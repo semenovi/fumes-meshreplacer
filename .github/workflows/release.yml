@@ -22,8 +22,21 @@ jobs:
       - name: Build
         run: dotnet build MeshReplacer/MeshReplacer.csproj --configuration Release --no-incremental
 
+      - name: Package
+        shell: pwsh
+        run: |
+          $staging = "staging"
+          New-Item -ItemType Directory $staging | Out-Null
+          Copy-Item "MeshReplacer/bin/Release/net6.0/MeshReplacer.dll" $staging
+          if (Test-Path "cars") {
+            $dest = "$staging/meshreplacer"
+            New-Item -ItemType Directory $dest | Out-Null
+            Copy-Item "cars/*" $dest -Recurse
+          }
+          Compress-Archive -Path "$staging/*" -DestinationPath "MeshReplacer.zip"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: MeshReplacer/bin/Release/net6.0/MeshReplacer.dll
+          files: MeshReplacer.zip
           generate_release_notes: true

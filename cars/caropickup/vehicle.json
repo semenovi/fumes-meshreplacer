@@ -1,0 +1,81 @@
+{
+  "id": "body-caro-pickup",
+  "baseBodyId": "body-caro",
+  "displayName": "Caro Pickup",
+  "vehicleMarker": "CaroModel",
+
+  "meshReplacements": [
+    {
+      "bundle": "carobody",
+      "candidates": ["Caro_Pickup(6)"],
+      "target": "CaroModel",
+      "isBody": true
+    },
+    {
+      "bundle": "caroreardoor",
+      "candidates": ["Caro_Pickup-reardoor"],
+      "target": "CaroDoorRear",
+      "fixMaterialSlots": true
+    },
+    {
+      "bundle": "carochrome2",
+      "candidates": ["Caro_Pickup-chrome02", "Caro_Pickup-chrome2"],
+      "target": "CaroChromeDetails02"
+    },
+    {
+      "bundle": "caroexhaust02a",
+      "candidates": ["Caro_Pickup-exhaust02a", "CaroExhaust02A"],
+      "target": "CaroExhaust02A"
+    },
+    {
+      "bundle": "caroexhaust02b",
+      "candidates": ["Caro_Pickup-exhaust02b", "CaroExhaust02B"],
+      "target": "CaroExhaust02B"
+    }
+  ],
+
+  "vehicleBody": {
+    "grillPosition":          [0,      0.36,  1.86],
+    "interiorCameraPosition": [-0.381, 1.15,  0.54],
+    "enginePosition":         [0,      0.49,  1.2],
+    "frontLampsColor":        [1.0, 0.7882353, 0.49411765, 1.0],
+    "cargoStrapsHooks": [
+      [-0.55,  0.30, -0.64],
+      [ 0.55,  0.30, -0.64],
+      [ 0.55,  0.30, -1.87],
+      [-0.55,  0.30, -1.87],
+      [-0.67,  0.73,  0.62],
+      [ 0.67,  0.73,  0.62],
+      [ 0.73,  0.59,  1.71],
+      [-0.73,  0.59,  1.71]
+    ],
+    "lamps": [
+      {"front": true,  "bulb": [ 0.59,  0.36,  1.82]},
+      {"front": true,  "bulb": [-0.59,  0.36,  1.82]},
+      {"front": true,  "bulb": [-0.51,  1.45,  0.27]},
+      {"front": true,  "bulb": [ 0.17,  1.45,  0.27]},
+      {"front": true,  "bulb": [ 0.51,  1.45,  0.27]},
+      {"front": true,  "bulb": [-0.17,  1.45,  0.27]},
+      {"front": false, "bulb": [-0.66,  0.39, -2.10]},
+      {"front": false, "bulb": [ 0.66,  0.39, -2.10]}
+    ],
+    "frontLampsLightPosition": [0, 0.726, 1.388],
+    "frontLampsShafts": [
+      {"position": [-0.6, 0.245, 2.618], "scale": [2, 1.30364, 1.4018552]},
+      {"position": [ 0.6, 0.245, 2.618], "scale": [2, 1.30364, 1.4018552]}
+    ],
+    "roofLampPartGo": "CaroChromeDetails02",
+    "roofLampIndices": [2, 3, 4, 5],
+    "frontLampBulbGoName": "TartarusChromeDetail02",
+    "frontLampBulbPosition": [0, 0.076, -0.867],
+    "frontLampBulbScale": [1.405, 1.0, 1.0]
+  },
+
+  "antennaPosition": [0.44, 0.515, -1.8],
+
+  "hardpoints": [
+    {"index": 0, "position": [0,  1.52,   -0.1]},
+    {"index": 1, "position": [0,  0.3,    -1.4]},
+    {"index": 3, "position": [0, 10.225,   1.63]}
+  ]
+}
