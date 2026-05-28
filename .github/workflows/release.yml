@@ -1,0 +1,27 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 6
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Build
+        run: dotnet build MeshReplacer/MeshReplacer.csproj --configuration Release --no-incremental
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MeshReplacer/bin/Release/net6.0/MeshReplacer.dll
+          generate_release_notes: true
