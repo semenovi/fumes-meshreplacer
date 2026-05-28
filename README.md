@@ -22,7 +22,7 @@ A [BepInEx](https://github.com/BepInEx/BepInEx) plugin for [FUMES](https://store
 
 ## Installation
 
-1. Install [BepInEx 6 IL2CPP](https://github.com/BepInEx/BepInEx/releases) into the FUMES directory.
+1. Install [BepInEx IL2CPP bleeding edge build](https://builds.bepinex.dev/projects/bepinex_be) (build 755 or compatible) into the FUMES directory.
 2. Copy `MeshReplacer.dll` to `BepInEx/plugins/`.
 3. Create the mod data directory: `BepInEx/plugins/meshreplacer/`.
 4. For each custom vehicle, create a subdirectory and add a `vehicle.json` plus AssetBundle files:
