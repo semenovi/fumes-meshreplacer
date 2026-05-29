@@ -56,7 +56,6 @@ static class MeshReplacer
                         RegisterPaintMask(mr, def.PaintMaskTextureName);
                     if (def.AlbedoTextureName != null)
                         RegisterAlbedo(mr, def.AlbedoTextureName);
-
                 }
             }
 
@@ -162,7 +161,11 @@ static class MeshReplacer
     {
         var block = new MaterialPropertyBlock();
         mr.GetPropertyBlock(block);
-        block.SetTexture("_MainTex", tex);
+        block.SetTexture("_MainTex",      tex);
+        // Game/Lamp shader may use a different property — try candidates
+        block.SetTexture("_AlbedoTex",    tex);
+        block.SetTexture("_AlbedoTexture",tex);
+        block.SetTexture("_BaseMap",      tex);
         mr.SetPropertyBlock(block);
         Plugin.L.LogInfo($"[ALB] '{tex.name}' -> '{mr.gameObject.name}'");
     }
