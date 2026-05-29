@@ -8,8 +8,8 @@ static class MeshReplacer
     static readonly Dictionary<string, Mesh?> _cache  = new();
     static readonly List<(MeshRenderer mr, int slots)>           _fixers          = new();
     // mr + cached resolved Texture (null = not yet found); applied once via MPB
-    static readonly List<(MeshRenderer mr, Texture? tex, string name)> _paintMasks = new();
-    static readonly List<(MeshRenderer mr, Texture? tex, string name)> _albedos    = new();
+    static readonly List<(MeshRenderer mr, Texture? tex, string name)>            _paintMasks = new();
+    static readonly List<(MeshRenderer mr, Texture? tex, string name, bool isBody)> _albedos  = new();
 
     public static void Apply(Transform vehicleRoot)
     {
@@ -55,7 +55,7 @@ static class MeshReplacer
                     if (def.PaintMaskTextureName != null)
                         RegisterPaintMask(mr, def.PaintMaskTextureName);
                     if (def.AlbedoTextureName != null)
-                        RegisterAlbedo(mr, def.AlbedoTextureName);
+                        RegisterAlbedo(mr, def.AlbedoTextureName, isBody: true);
                 }
             }
 
@@ -71,7 +71,7 @@ static class MeshReplacer
                 if (mr != null)
                 {
                     if (def.PaintMaskTextureName != null) RegisterPaintMask(mr, def.PaintMaskTextureName);
-                    if (def.AlbedoTextureName    != null) RegisterAlbedo(mr, def.AlbedoTextureName);
+                    if (def.AlbedoTextureName    != null) RegisterAlbedo(mr, def.AlbedoTextureName, isBody: false);
                 }
             }
         }
@@ -134,7 +134,7 @@ static class MeshReplacer
         return null;
     }
 
-    static void RegisterAlbedo(MeshRenderer mr, string name)
+    static void RegisterAlbedo(MeshRenderer mr, string name, bool isBody)
     {
         for (int i = 0; i < _albedos.Count; i++)
         {
@@ -142,32 +142,57 @@ static class MeshReplacer
             catch { _albedos.RemoveAt(i--); }
         }
         var tex = FindTexture(name);
-        _albedos.Add((mr, tex, name));
-        if (tex != null) DoSetAlbedo(mr, tex);
+        _albedos.Add((mr, tex, name, isBody));
+        if (tex != null) DoSetAlbedo(mr, tex, isBody);
         else Plugin.L.LogWarning($"[ALB] '{name}' not found yet, will retry");
     }
 
     static void TryApplyAlbedo(int i)
     {
-        var (mr, tex, name) = _albedos[i];
+        var (mr, tex, name, isBody) = _albedos[i];
         if (tex != null) return;
         tex = FindTexture(name);
         if (tex == null) return;
-        _albedos[i] = (mr, tex, name);
-        DoSetAlbedo(mr, tex);
+        _albedos[i] = (mr, tex, name, isBody);
+        DoSetAlbedo(mr, tex, isBody);
     }
 
-    static void DoSetAlbedo(MeshRenderer mr, Texture tex)
+    // Game/Car Paint shader reads _MainTex.
+    // Game/Lamp shader reads _AlbedoTexture.
+    // Renderer-level MPB overrides ALL submesh slots, so we must NOT set _AlbedoTexture
+    // at renderer level — that would break front lamp glass appearance.
+    // Instead, apply _AlbedoTexture via per-material MPB for rear lamp slots only.
+    static void DoSetAlbedo(MeshRenderer mr, Texture tex, bool isBody)
     {
         var block = new MaterialPropertyBlock();
         mr.GetPropertyBlock(block);
-        block.SetTexture("_MainTex",      tex);
-        // Game/Lamp shader may use a different property — try candidates
-        block.SetTexture("_AlbedoTex",    tex);
-        block.SetTexture("_AlbedoTexture",tex);
-        block.SetTexture("_BaseMap",      tex);
+        block.SetTexture("_MainTex", tex);
         mr.SetPropertyBlock(block);
         Plugin.L.LogInfo($"[ALB] '{tex.name}' -> '{mr.gameObject.name}'");
+
+        if (!isBody) return;
+
+        // Rear lamp material stores albedo in _AlbedoTexture (Game/Lamp shader).
+        // The skin system applies a material-level albedo that may look wrong for our vehicle.
+        // Use per-material MPB to override only the rear lamp slot.
+        try
+        {
+            var mats = mr.sharedMaterials;
+            if (mats == null) return;
+            for (int slot = 0; slot < mats.Length; slot++)
+            {
+                var mat = mats[slot];
+                if (mat == null) continue;
+                var mname = mat.name ?? "";
+                if (!mname.Contains("Lamp") || !mname.Contains("Rear")) continue;
+                var slotBlock = new MaterialPropertyBlock();
+                mr.GetPropertyBlock(slotBlock, slot);
+                slotBlock.SetTexture("_AlbedoTexture", tex);
+                mr.SetPropertyBlock(slotBlock, slot);
+                Plugin.L.LogInfo($"[ALB]   rear lamp slot[{slot}] '{mname}' _AlbedoTexture -> '{tex.name}'");
+            }
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"[ALB] per-slot: {e.Message}"); }
     }
 
     public static void FixAlbedos()
