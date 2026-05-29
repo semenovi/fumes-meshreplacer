@@ -1,0 +1,81 @@
+{
+  "id": "body-cricket-beetle",
+  "baseBodyId": "body-cricket",
+  "displayName": "beetle",
+  "vehicleMarker": "CricketBodyModel",
+
+  "paintMaskTextureName": "BizonPaintMaskTexture",
+  "albedoTextureName":    "BizonAlbedoTexture",
+
+  "meshReplacements": [
+    {
+      "bundle": "beetlebody",
+      "candidates": ["beetlebody(6)", "beetlebody"],
+      "target": "CricketBodyModel",
+      "isBody": true
+    },
+    {
+      "bundle": "beetleleftdoor",
+      "candidates": ["leftdoor", "beetleleftdoor"],
+      "target": "CricketDoorL",
+      "fixMaterialSlots": true
+    },
+    {
+      "bundle": "beetlerightdoor",
+      "candidates": ["rightdoor", "beetlerightdoor"],
+      "target": "CricketDoorR",
+      "fixMaterialSlots": true
+    },
+    {
+      "bundle": "trunk",
+      "candidates": ["trunk"],
+      "target": "CricketTrunkDoor",
+      "fixMaterialSlots": true
+    },
+    {
+      "bundle": "chromedetail02",
+      "candidates": ["chromedetail02"],
+      "target": "CricketFrontLights"
+    },
+    {
+      "bundle": "hood",
+      "candidates": ["hood"],
+      "target": "CricketHood"
+    },
+    {
+      "bundle": "spoiler",
+      "candidates": ["spoiler"],
+      "target": "CricketSpoiler1"
+    }
+  ],
+
+  "vehicleBody": {
+    "grillPosition":          [0,      0.394, 1.985],
+    "interiorCameraPosition": [-0.265, 0.905, 0.683],
+    "enginePosition":         [0,      0.156, 1.386],
+    "frontLampsColor":        [1.0, 0.8666667, 0.46666667, 1.0],
+    "cargoStrapsHooks": [
+      [ 0.53,  1.05,  0.08],
+      [-0.53,  1.05,  0.08],
+      [-0.53,  1.05, -1.18],
+      [ 0.53,  1.05, -1.18],
+      [ 0.63,  0.45,  1.8],
+      [-0.63,  0.45,  1.8]
+    ],
+    "lamps": [
+      {"front": true,  "bulb": [ 0.55,  0.38,  1.78]},
+      {"front": true,  "bulb": [-0.55,  0.38,  1.78]},
+      {"front": true,  "bulb": [-0.22,  0.38,  1.9]},
+      {"front": true,  "bulb": [ 0.22,  0.38,  1.9]},
+      {"front": true,  "bulb": [ 0,     0.38,  1.9]},
+      {"front": false, "bulb": [-0.49,  0.39, -1.72]},
+      {"front": false, "bulb": [ 0.49,  0.39, -1.72]}
+    ]
+  },
+
+  "hardpoints": [
+    {"index": 0, "position": [0.131, 1.12,  -0.414]},
+    {"index": 1, "position": [0.247, 0.618,  1.39]},
+    {"index": 2, "position": [0,     0.35,   1.871]}
+  ]
+}

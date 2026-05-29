@@ -57,6 +57,9 @@ public class CustomVehicleDef
     public float[]?           AntennaPosition  { get; set; }
     public HardpointPatch[]?  Hardpoints       { get; set; }
 
+    public string? PaintMaskTextureName { get; set; }
+    public string? AlbedoTextureName    { get; set; }
+
     [System.Text.Json.Serialization.JsonIgnore]
     public string FolderPath { get; set; } = "";
 }

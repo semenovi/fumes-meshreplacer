@@ -6,7 +6,10 @@ static class MeshReplacer
 {
     // Bundle path -> asset name -> Mesh
     static readonly Dictionary<string, Mesh?> _cache  = new();
-    static readonly List<(MeshRenderer mr, int slots)> _fixers = new();
+    static readonly List<(MeshRenderer mr, int slots)>           _fixers          = new();
+    // mr + cached resolved Texture (null = not yet found); applied once via MPB
+    static readonly List<(MeshRenderer mr, Texture? tex, string name)> _paintMasks = new();
+    static readonly List<(MeshRenderer mr, Texture? tex, string name)> _albedos    = new();
 
     public static void Apply(Transform vehicleRoot)
     {
@@ -48,6 +51,12 @@ static class MeshReplacer
                     if (MaterialCycler.Saved == null)
                         MaterialCycler.Saved = mr.sharedMaterials;
                     MaterialCycler.Renderer = mr;
+
+                    if (def.PaintMaskTextureName != null)
+                        RegisterPaintMask(mr, def.PaintMaskTextureName);
+                    if (def.AlbedoTextureName != null)
+                        RegisterAlbedo(mr, def.AlbedoTextureName);
+
                 }
             }
 
@@ -55,6 +64,16 @@ static class MeshReplacer
             {
                 var mr = targetGo.GetComponent<MeshRenderer>();
                 if (mr != null) RegisterFixer(mr, mesh.subMeshCount);
+            }
+
+            if (!entry.IsBody)
+            {
+                var mr = targetGo.GetComponent<MeshRenderer>();
+                if (mr != null)
+                {
+                    if (def.PaintMaskTextureName != null) RegisterPaintMask(mr, def.PaintMaskTextureName);
+                    if (def.AlbedoTextureName    != null) RegisterAlbedo(mr, def.AlbedoTextureName);
+                }
             }
         }
 
@@ -73,6 +92,98 @@ static class MeshReplacer
             return VehicleFactory.GetDefForVehicle(vehicle);
         }
         catch { return null; }
+    }
+
+    static void RegisterPaintMask(MeshRenderer mr, string name)
+    {
+        for (int i = 0; i < _paintMasks.Count; i++)
+        {
+            try { if (_paintMasks[i].mr == mr) { TryApplyPaintMask(i); return; } }
+            catch { _paintMasks.RemoveAt(i--); }
+        }
+        var tex = FindTexture(name);
+        _paintMasks.Add((mr, tex, name));
+        if (tex != null) DoSetPaintMask(mr, tex);
+        else Plugin.L.LogWarning($"[PM] '{name}' not found yet, will retry");
+    }
+
+    static void TryApplyPaintMask(int i)
+    {
+        var (mr, tex, name) = _paintMasks[i];
+        if (tex != null) return;
+        tex = FindTexture(name);
+        if (tex == null) return;
+        _paintMasks[i] = (mr, tex, name);
+        DoSetPaintMask(mr, tex);
+    }
+
+    static void DoSetPaintMask(MeshRenderer mr, Texture tex)
+    {
+        var block = new MaterialPropertyBlock();
+        mr.GetPropertyBlock(block);
+        block.SetTexture("_PaintMaskTexture", tex);
+        mr.SetPropertyBlock(block);
+        Plugin.L.LogInfo($"[PM] '{tex.name}' -> '{mr.gameObject.name}'");
+    }
+
+    static Texture? FindTexture(string name)
+    {
+        var all = Resources.FindObjectsOfTypeAll<Texture2D>();
+        if (all == null) return null;
+        foreach (var t in all)
+            try { if (t.name == name) return t; } catch { }
+        return null;
+    }
+
+    static void RegisterAlbedo(MeshRenderer mr, string name)
+    {
+        for (int i = 0; i < _albedos.Count; i++)
+        {
+            try { if (_albedos[i].mr == mr) { TryApplyAlbedo(i); return; } }
+            catch { _albedos.RemoveAt(i--); }
+        }
+        var tex = FindTexture(name);
+        _albedos.Add((mr, tex, name));
+        if (tex != null) DoSetAlbedo(mr, tex);
+        else Plugin.L.LogWarning($"[ALB] '{name}' not found yet, will retry");
+    }
+
+    static void TryApplyAlbedo(int i)
+    {
+        var (mr, tex, name) = _albedos[i];
+        if (tex != null) return;
+        tex = FindTexture(name);
+        if (tex == null) return;
+        _albedos[i] = (mr, tex, name);
+        DoSetAlbedo(mr, tex);
+    }
+
+    static void DoSetAlbedo(MeshRenderer mr, Texture tex)
+    {
+        var block = new MaterialPropertyBlock();
+        mr.GetPropertyBlock(block);
+        block.SetTexture("_MainTex", tex);
+        mr.SetPropertyBlock(block);
+        Plugin.L.LogInfo($"[ALB] '{tex.name}' -> '{mr.gameObject.name}'");
+    }
+
+    public static void FixAlbedos()
+    {
+        for (int i = _albedos.Count - 1; i >= 0; i--)
+        {
+            try { if (_albedos[i].tex == null) TryApplyAlbedo(i); }
+            catch { _albedos.RemoveAt(i); }
+        }
+    }
+
+    // Retries pending paint mask overrides; no-op once all textures are resolved.
+    public static void FixPaintMasks()
+    {
+        for (int i = _paintMasks.Count - 1; i >= 0; i--)
+        {
+            try { if (_paintMasks[i].tex == null) TryApplyPaintMask(i); }
+            catch { _paintMasks.RemoveAt(i); }
+        }
     }
 
     public static void FixMaterialSlots()

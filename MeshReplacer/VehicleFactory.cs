@@ -23,12 +23,6 @@ static class VehicleFactory
             // Check license-plate marker (vehicle assembled from Cars slot).
             var plate = vehicle.config?.licensePlate;
             if (plate != null && _defs.TryGetValue(plate, out var d1)) return d1;
-            // Test slot: plate is "def.Id-clonetest" — strip suffix and look up.
-            if (plate != null && plate.EndsWith("-clonetest"))
-            {
-                var baseId = plate[..^"-clonetest".Length];
-                if (_defs.TryGetValue(baseId, out var d3)) return d3;
-            }
             // Check body type id (vehicle assembled from Body slot with cloned BodyType).
             var bodyId = vehicle.config?.body?.Type?.id;
             if (bodyId != null && _defs.TryGetValue(bodyId, out var d2)) return d2;
@@ -151,6 +145,12 @@ static class VehicleFactory
         var toAdd    = new List<Save.VehicleConfigSaveData>();
         var toRepair = new Dictionary<int, Save.VehicleConfigSaveData>();
 
+        // Fallback: any config with non-null skin+engine (used when base body not owned yet).
+        Save.VehicleConfigSaveData? anyConfig = null;
+        for (int i = 0; i < configs.Length; i++)
+            try { if (configs[i]?.skin != null && configs[i]?.engine != null) { anyConfig = configs[i]; break; } } catch { }
+        if (anyConfig == null) try { anyConfig = save.config; } catch { }
+
         foreach (var def in _defs.Values)
         {
             Save.VehicleConfigSaveData? baseConfig = null;
@@ -158,6 +158,8 @@ static class VehicleFactory
                 try { if (configs[i]?.body?.id == def.BaseBodyId) { baseConfig = configs[i]; break; } } catch { }
             if (baseConfig == null)
                 try { if (save.config?.body?.id == def.BaseBodyId) baseConfig = save.config; } catch { }
+            // If still null (player never owned that base body), use any valid config for equipment.
+            if (baseConfig == null) baseConfig = anyConfig;
 
             int existingIdx = -1;
             for (int i = 0; i < configs.Length; i++)
@@ -166,19 +168,6 @@ static class VehicleFactory
             var fresh = BuildConfig(def, baseConfig);
             if (existingIdx >= 0) toRepair[existingIdx] = fresh;
             else toAdd.Add(fresh);
-
-            // Test slot: same vehicle but using clone body id to exercise RuntimeInit fix.
-            string testPlate = def.Id + "-clonetest";
-            bool testExists = false;
-            for (int i = 0; i < configs.Length; i++)
-                try { if (configs[i]?.licensePlate == testPlate) { testExists = true; break; } } catch { }
-            if (!testExists)
-            {
-                var testSlot = BuildConfig(def, baseConfig, useCloneId: true);
-                testSlot.licensePlate = testPlate;
-                toAdd.Add(testSlot);
-                Plugin.L.LogInfo($"[VF] Injected clone-id test slot '{testPlate}'");
-            }
         }
 
         foreach (var kv in toRepair) { configs[kv.Key] = kv.Value; Plugin.L.LogInfo($"[VF] Repaired Cars slot {kv.Key}"); }

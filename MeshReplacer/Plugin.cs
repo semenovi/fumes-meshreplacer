@@ -107,6 +107,8 @@ static class VehicleUpdatePatch
         _lastRunFrame = frame;
 
         MeshReplacer.FixMaterialSlots();
+        MeshReplacer.FixPaintMasks();
+        MeshReplacer.FixAlbedos();
 
         // Periodic LensFlare scan — every 300 frames, only for our custom vehicle
         if (frame - _lastScanFrame > 300)
