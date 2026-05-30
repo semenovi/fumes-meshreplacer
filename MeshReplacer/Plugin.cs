@@ -126,25 +126,44 @@ static class PopulateSuspensionsPatch
                 if (!bodyMap.TryGetValue(bodyId, out var entry)) return;
                 var (def, cloneBody, origBody) = entry;
 
-                // Collect allowed IDs (null = all for that body type).
-                HashSet<string>? allowed = def.AvailableSuspensions != null
-                    ? new HashSet<string>(def.AvailableSuspensions)
-                    : null;
-
                 var suspensions = Game.ItemDatabase.Suspensions;
-                for (int i = 0; i < suspensions.Count; i++)
+
+                if (def.AvailableSuspensions != null)
                 {
-                    try
+                    // Explicit list: find each suspension by ID and swap regardless of its base body.
+                    // This allows mixing suspensions from different vehicle types.
+                    var byId = new Dictionary<string, Game.SuspensionType>();
+                    for (int i = 0; i < suspensions.Count; i++)
+                        try { var s = suspensions[i]; if (s?.id != null) byId[s.id] = s; } catch { }
+
+                    foreach (var suspId in def.AvailableSuspensions)
                     {
-                        var susp = suspensions[i];
-                        if (susp == null) continue;
-                        var suspBody = susp.body;
-                        if (suspBody == null || suspBody.Pointer != origBody.Pointer) continue;
-                        if (allowed != null && !allowed.Contains(susp.id ?? "")) continue;
-                        _swapped.Add((susp, suspBody));
-                        susp.body = cloneBody;
+                        try
+                        {
+                            if (!byId.TryGetValue(suspId, out var susp)) continue;
+                            var suspBody = susp.body;
+                            _swapped.Add((susp, suspBody));
+                            susp.body = cloneBody;
+                        }
+                        catch { }
                     }
-                    catch { }
+                }
+                else
+                {
+                    // No list configured: show all suspensions for the base body type.
+                    for (int i = 0; i < suspensions.Count; i++)
+                    {
+                        try
+                        {
+                            var susp = suspensions[i];
+                            if (susp == null) continue;
+                            var suspBody = susp.body;
+                            if (suspBody == null || suspBody.Pointer != origBody.Pointer) continue;
+                            _swapped.Add((susp, suspBody));
+                            susp.body = cloneBody;
+                        }
+                        catch { }
+                    }
                 }
                 Plugin.L.LogInfo($"[VF] PopulateSusp: swapped {_swapped.Count} suspension(s) for '{bodyId}'");
             }

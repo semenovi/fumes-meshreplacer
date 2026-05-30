@@ -115,7 +115,17 @@
     "suspension-cricket-digger",
     "suspension-cricket-monster",
     "suspension-cricket-rover",
-    "suspension-cricket-truck"
+    "suspension-cricket-truck",
+    "suspension-griffin-stock",
+    "suspension-griffin-offroad",
+    "suspension-griffin-rodded",
+    "suspension-griffin-halftrack",
+    "suspension-griffin-bullet",
+    "suspension-griffin-digger",
+    "suspension-griffin-monster",
+    "suspension-griffin-mud",
+    "suspension-griffin-rover",
+    "suspension-griffin-truck"
   ],
 
   "hardpoints": [
