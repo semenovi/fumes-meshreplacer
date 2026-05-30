@@ -120,7 +120,7 @@ static class MeshReplacer
         }
         var tex = FindTexture(name);
         _paintMasks.Add((mr, tex, name));
-        if (tex != null) DoSetPaintMask(mr, tex);
+        if (tex != null) { DoSetPaintMask(mr, tex); Plugin.L.LogInfo($"[PM] '{tex.name}' -> '{mr.gameObject.name}'"); }
         else Plugin.L.LogWarning($"[PM] '{name}' not found yet, will retry");
     }
 
@@ -132,6 +132,7 @@ static class MeshReplacer
         if (tex == null) return;
         _paintMasks[i] = (mr, tex, name);
         DoSetPaintMask(mr, tex);
+        Plugin.L.LogInfo($"[PM] (retry) '{tex.name}' -> '{mr.gameObject.name}'");
     }
 
     static void DoSetPaintMask(MeshRenderer mr, Texture tex)
@@ -140,7 +141,6 @@ static class MeshReplacer
         mr.GetPropertyBlock(block);
         block.SetTexture("_PaintMaskTexture", tex);
         mr.SetPropertyBlock(block);
-        Plugin.L.LogInfo($"[PM] '{tex.name}' -> '{mr.gameObject.name}'");
     }
 
     static Texture? FindTexture(string name)
@@ -161,7 +161,7 @@ static class MeshReplacer
         }
         var tex = FindTexture(name);
         _albedos.Add((mr, tex, name, isBody));
-        if (tex != null) DoSetAlbedo(mr, tex, isBody);
+        if (tex != null) { DoSetAlbedo(mr, tex, isBody); Plugin.L.LogInfo($"[ALB] '{tex.name}' -> '{mr.gameObject.name}'"); }
         else Plugin.L.LogWarning($"[ALB] '{name}' not found yet, will retry");
     }
 
@@ -173,6 +173,7 @@ static class MeshReplacer
         if (tex == null) return;
         _albedos[i] = (mr, tex, name, isBody);
         DoSetAlbedo(mr, tex, isBody);
+        Plugin.L.LogInfo($"[ALB] (retry) '{tex.name}' -> '{mr.gameObject.name}'");
     }
 
     // Game/Car Paint shader reads _MainTex.
@@ -186,7 +187,6 @@ static class MeshReplacer
         mr.GetPropertyBlock(block);
         block.SetTexture("_MainTex", tex);
         mr.SetPropertyBlock(block);
-        Plugin.L.LogInfo($"[ALB] '{tex.name}' -> '{mr.gameObject.name}'");
 
         if (!isBody) return;
 

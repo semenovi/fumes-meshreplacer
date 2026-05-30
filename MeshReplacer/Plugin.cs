@@ -151,6 +151,7 @@ static class VehicleAwakePatch
         {
             var def = VehicleFactory.GetDefForVehicle(__instance);
             if (def == null) return;
+            VehicleFactory.FixNullSkin(__instance);
             var bt = __instance.config?.body?.Type?.TryCast<Game.BodyType>();
             if (bt == null) return;
             VehicleFactory.PatchHardpoints(bt, def);

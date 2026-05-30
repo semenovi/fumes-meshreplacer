@@ -198,7 +198,9 @@ static class VehicleFactory
         try { if (src?.engine     != null) cfg.engine     = src.engine;     } catch { }
         try { if (src?.suspension != null) cfg.suspension = src.suspension; } catch { }
         try { if (src?.wheels     != null) cfg.wheels     = src.wheels;     } catch { }
-        try { if (src?.skin       != null) cfg.skin       = src.skin;       } catch { }
+        // Do NOT copy skin — VehicleConfigSaveData.GetSkin() resolves skin by player index,
+        // which can be out of range if src comes from a different save context (e.g. NPC config
+        // or our own repaired config from the previous session). FixNullSkin assigns at Awake.
         try { if (src?.bodyColor  != null) cfg.bodyColor  = src.bodyColor;  } catch { }
         try { if (src?.modules    != null) cfg.modules    = src.modules;    } catch { }
         try { if (src?.fireGroups != null) cfg.fireGroups = src.fireGroups; } catch { }
