@@ -106,6 +106,18 @@
     "licensePlateRotation": [0, 180, 0]
   },
 
+  "availableSuspensions": [
+    "suspension-cricket-stock",
+    "suspension-cricket-offroad",
+    "suspension-cricket-rodded",
+    "suspension-cricket-halftrack",
+    "suspension-cricket-bullet",
+    "suspension-cricket-digger",
+    "suspension-cricket-monster",
+    "suspension-cricket-rover",
+    "suspension-cricket-truck"
+  ],
+
   "hardpoints": [
     {"index": 0, "position": [0.0, 1.30,  -0.414]},
     {"index": 1, "position": [0.0, 0.8,  1.19]},

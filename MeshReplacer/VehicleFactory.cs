@@ -1,20 +1,33 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using UnityEngine;
 
 static class VehicleFactory
 {
     // Keyed by def.Id.
-    static readonly Dictionary<string, CustomVehicleDef> _defs   = new();
-    static readonly List<Game.BodyType>                  _clones = new();
+    static readonly Dictionary<string, CustomVehicleDef> _defs     = new();
+    static readonly List<Game.BodyType>                  _clones   = new();
+    // Maps clone body id → (def, cloneBodyType, originalBodyType) for the suspension patch.
+    static readonly Dictionary<string, (CustomVehicleDef def, Game.BodyType clone, Game.BodyType original)> _bodyMap = new();
     static bool _bodiesInjected;
+
+    // ── Debug toggle ──────────────────────────────────────────────────────────
+    // When true: one item of each configured suspension is granted to the player
+    // on every game load so all options are immediately testable in the garage.
+    // Set to false before release to stop handing out free suspensions.
+    public static bool GrantDebugSuspensions = true;
+    // ─────────────────────────────────────────────────────────────────────────
 
     // Look up def by license-plate marker (Cars list) or by cloned body type id (Body list).
     public static CustomVehicleDef? GetDef(string? id)
         => id != null && _defs.TryGetValue(id, out var d) ? d : null;
 
     public static List<Game.BodyType> GetClones() => _clones;
+
+    public static Dictionary<string, (CustomVehicleDef def, Game.BodyType clone, Game.BodyType original)> GetBodyMap()
+        => _bodyMap;
 
     public static CustomVehicleDef? GetDefForVehicle(Game.Vehicle vehicle)
     {
@@ -82,6 +95,7 @@ static class VehicleFactory
 
             _defs[def.Id] = def;
             _clones.Add(clone);
+            _bodyMap[def.Id] = (def, clone, baseBody);
             Plugin.L.LogInfo($"[VF] Created body type '{def.Id}' (clone of '{def.BaseBodyId}')");
         }
     }
@@ -94,9 +108,48 @@ static class VehicleFactory
         {
             InjectItems(save);
             InjectConfigs(save);
+            InjectSuspensionItems(save);
         }
         catch (Exception e) { Plugin.L.LogError($"[VF] InjectSaveConfigs: {e.Message}"); }
     }
+
+    // ── [DEBUG] Grants one item of each configured suspension to the player ──────
+    // Grants original suspension IDs so the player can install them from either
+    // the Cars-list or Body-list garage. The Body-list garage uses a PopulateSuspensions
+    // patch that temporarily matches original suspensions to the custom body type pointer,
+    // so no clone IDs are needed. Set GrantDebugSuspensions = false before release.
+    static void InjectSuspensionItems(Save.PlayerSaveData save)
+    {
+        if (!GrantDebugSuspensions) return;
+
+        var items = save.items;
+        if (items == null) return;
+
+        var existing = new HashSet<string>();
+        for (int i = 0; i < items.Length; i++)
+            try { var id = items[i]?.id; if (id != null) existing.Add(id); } catch { }
+
+        var toAdd = new List<Save.ItemSaveData>();
+        foreach (var def in _defs.Values)
+        {
+            if (def.AvailableSuspensions == null) continue;
+            foreach (var suspId in def.AvailableSuspensions)
+                if (existing.Add(suspId))
+                    toAdd.Add(new Save.ItemSaveData { id = suspId });
+        }
+
+        if (toAdd.Count == 0) return;
+
+        int oldLen = items.Length;
+        var newArr = new Il2CppReferenceArray<Save.ItemSaveData>(oldLen + toAdd.Count);
+        for (int i = 0; i < oldLen; i++) newArr[i] = items[i];
+        for (int i = 0; i < toAdd.Count; i++) newArr[oldLen + i] = toAdd[i];
+        save.items = newArr;
+
+        foreach (var e in toAdd)
+            Plugin.L.LogInfo($"[VF] [DEBUG] Granted suspension '{e.id}'");
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     // Adds an ItemSaveData entry to save.items so the Body list shows the custom body.
     static void InjectItems(Save.PlayerSaveData save)

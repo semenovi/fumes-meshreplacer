@@ -71,6 +71,16 @@
     "frontLampBulbScale": [1.405, 1.0, 1.0]
   },
 
+  "availableSuspensions": [
+    "suspension-caro-stock",
+    "suspension-caro-offroad",
+    "suspension-caro-rodded",
+    "suspension-caro-halftrack",
+    "suspension-caro-bullet",
+    "suspension-caro-digger",
+    "suspension-caro-monster"
+  ],
+
   "antennaPosition": [0.44, 0.515, -1.8],
 
   "hardpoints": [

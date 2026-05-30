@@ -94,8 +94,62 @@ static class MeshReplacer
             }
         }
 
+        SyncLampMaterials(vehicleRoot, def);
         LogVehicleState(vehicleRoot, def);
         VehiclePatcher.Apply(vehicleRoot, def);
+    }
+
+    public static void SyncLampMaterialsForVehicle(Transform vehicleRoot)
+    {
+        var def = GetDefForVehicle(vehicleRoot);
+        if (def == null) return;
+        SyncLampMaterials(vehicleRoot, def);
+    }
+
+    static void SyncLampMaterials(Transform vehicleRoot, CustomVehicleDef def)
+    {
+        bool needSync = false;
+        foreach (var e in def.MeshReplacements)
+            if (e.SyncFrontLampSlot) { needSync = true; break; }
+        if (!needSync) return;
+
+        var vb = vehicleRoot.GetComponentInChildren<Game.VehicleBody>(true);
+        if (vb == null) { Plugin.L.LogWarning("[LSYNC] VehicleBody not found"); return; }
+
+        var fmats = vb.frontLampsMaterials;
+        if (fmats == null || fmats.Count == 0) { Plugin.L.LogWarning("[LSYNC] frontLampsMaterials empty"); return; }
+        var registeredFrontMat = fmats[0];
+        if (registeredFrontMat == null) { Plugin.L.LogWarning("[LSYNC] frontLampsMaterials[0] null"); return; }
+
+        var markerGo = FindInHierarchy(vehicleRoot, def.VehicleMarker);
+        if (markerGo == null) return;
+
+        foreach (var entry in def.MeshReplacements)
+        {
+            if (!entry.SyncFrontLampSlot || entry.MaterialSlots == null) continue;
+            var targetGo = entry.Target == def.VehicleMarker
+                ? markerGo
+                : FindInHierarchy(markerGo.transform, entry.Target);
+            if (targetGo == null) continue;
+            var mr = targetGo.GetComponent<MeshRenderer>();
+            if (mr == null) continue;
+
+            var mats = mr.sharedMaterials;
+            if (mats == null) continue;
+            bool changed = false;
+            for (int i = 0; i < System.Math.Min(mats.Length, entry.MaterialSlots.Length); i++)
+            {
+                var slotName = entry.MaterialSlots[i];
+                if (string.IsNullOrEmpty(slotName)) continue;
+                if (!slotName.Contains("LampFront") && !slotName.Contains("FrontLamp")) continue;
+                if (mats[i]?.Pointer == registeredFrontMat.Pointer) continue;
+                string oldPtr = mats[i] != null ? $"0x{mats[i].Pointer:X}" : "null";
+                Plugin.L.LogInfo($"[LSYNC] '{targetGo.name}' slot[{i}]: '{mats[i]?.name}'({oldPtr}) -> '{registeredFrontMat.name}'(0x{registeredFrontMat.Pointer:X})");
+                mats[i] = registeredFrontMat;
+                changed = true;
+            }
+            if (changed) mr.sharedMaterials = mats;
+        }
     }
 
     // Returns the CustomVehicleDef for this vehicle.
@@ -305,9 +359,22 @@ static class MeshReplacer
         if (_matCache.TryGetValue(name, out var cached)) return cached;
         var all = Resources.FindObjectsOfTypeAll<Material>();
         Material? found = null;
+        int matchCount = 0;
         if (all != null)
             foreach (var m in all)
-                try { if (m?.name == name) { found = m; break; } } catch { }
+            {
+                try
+                {
+                    if (m == null) continue;
+                    // Log all materials whose name contains the search term (catches Clone variants)
+                    if (m.name != null && m.name.Contains(name))
+                        Plugin.L.LogInfo($"[MSLOT] candidate for '{name}': '{m.name}'(0x{m.Pointer:X})");
+                    if (m.name == name) { if (found == null) found = m; matchCount++; }
+                }
+                catch { }
+            }
+        if (matchCount > 1)
+            Plugin.L.LogWarning($"[MSLOT] '{name}' matched {matchCount} times in Resources — using first");
         if (found != null) _matCache[name] = found;
         else Plugin.L.LogWarning($"[MSLOT] Material '{name}' not found in Resources");
         return found;

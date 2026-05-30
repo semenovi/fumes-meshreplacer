@@ -21,6 +21,9 @@ public class MeshEntry
     public bool      SkipTextures     { get; set; }
     // Skip only the paint mask override; albedo (_MainTex) is still applied.
     public bool      SkipPaintMask    { get; set; }
+    // After materialSlots are applied, replace any front-lamp slot with VehicleBody.frontLampsMaterials[0]
+    // so the panel shares the same material pointer registered in VehicleLampsController's GPUBuffer.
+    public bool      SyncFrontLampSlot { get; set; }
 }
 
 public class LampConfig
@@ -74,6 +77,10 @@ public class CustomVehicleDef
 
     public string? PaintMaskTextureName { get; set; }
     public string? AlbedoTextureName    { get; set; }
+
+    // Suspension type IDs (from ItemDatabase) that should be available in the garage for this body.
+    // Each listed suspension is cloned and bound to this custom body type so the garage shows them.
+    public string[]? AvailableSuspensions { get; set; }
 
     [System.Text.Json.Serialization.JsonIgnore]
     public string FolderPath { get; set; } = "";
