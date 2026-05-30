@@ -4,12 +4,15 @@ using UnityEngine;
 
 static class MeshReplacer
 {
-    // Bundle path -> asset name -> Mesh
-    static readonly Dictionary<string, Mesh?> _cache  = new();
-    static readonly List<(MeshRenderer mr, int slots)>           _fixers          = new();
+    // Bundle path -> asset name -> Mesh (also "game|<name>" for Resources meshes)
+    static readonly Dictionary<string, Mesh?>     _cache     = new();
+    // Material name -> Material (for materialSlots lookups)
+    static readonly Dictionary<string, Material?> _matCache  = new();
+    static readonly List<(MeshRenderer mr, int slots)>                              _fixers     = new();
+    static readonly List<(MeshRenderer mr, string[] names)>                         _matSlots   = new();
     // mr + cached resolved Texture (null = not yet found); applied once via MPB
-    static readonly List<(MeshRenderer mr, Texture? tex, string name)>            _paintMasks = new();
-    static readonly List<(MeshRenderer mr, Texture? tex, string name, bool isBody)> _albedos  = new();
+    static readonly List<(MeshRenderer mr, Texture? tex, string name)>              _paintMasks = new();
+    static readonly List<(MeshRenderer mr, Texture? tex, string name, bool isBody)> _albedos    = new();
 
     public static void Apply(Transform vehicleRoot)
     {
@@ -65,13 +68,28 @@ static class MeshReplacer
                 if (mr != null) RegisterFixer(mr, mesh.subMeshCount);
             }
 
-            if (!entry.IsBody)
+            if (entry.MaterialSlots != null)
+            {
+                var mr = targetGo.GetComponent<MeshRenderer>();
+                if (mr != null) RegisterMatSlots(mr, entry.MaterialSlots);
+            }
+
+            if (entry.TargetRotation != null)
+                ApplyWithWrapper(targetGo, entry.TargetPosition, entry.TargetRotation);
+            else if (entry.TargetPosition != null)
+                targetGo.transform.localPosition = new UnityEngine.Vector3(
+                    entry.TargetPosition[0], entry.TargetPosition[1], entry.TargetPosition[2]);
+            if (entry.TargetScale != null)
+                targetGo.transform.localScale = new UnityEngine.Vector3(
+                    entry.TargetScale[0], entry.TargetScale[1], entry.TargetScale[2]);
+
+            if (!entry.IsBody && !entry.SkipTextures)
             {
                 var mr = targetGo.GetComponent<MeshRenderer>();
                 if (mr != null)
                 {
-                    if (def.PaintMaskTextureName != null) RegisterPaintMask(mr, def.PaintMaskTextureName);
-                    if (def.AlbedoTextureName    != null) RegisterAlbedo(mr, def.AlbedoTextureName, isBody: false);
+                    if (!entry.SkipPaintMask && def.PaintMaskTextureName != null) RegisterPaintMask(mr, def.PaintMaskTextureName);
+                    if (def.AlbedoTextureName != null) RegisterAlbedo(mr, def.AlbedoTextureName, isBody: false);
                 }
             }
         }
@@ -199,17 +217,26 @@ static class MeshReplacer
     {
         for (int i = _albedos.Count - 1; i >= 0; i--)
         {
-            try { if (_albedos[i].tex == null) TryApplyAlbedo(i); }
+            try
+            {
+                var (mr, tex, name, isBody) = _albedos[i];
+                if (tex == null) TryApplyAlbedo(i);
+                else DoSetAlbedo(mr, tex, isBody);
+            }
             catch { _albedos.RemoveAt(i); }
         }
     }
 
-    // Retries pending paint mask overrides; no-op once all textures are resolved.
     public static void FixPaintMasks()
     {
         for (int i = _paintMasks.Count - 1; i >= 0; i--)
         {
-            try { if (_paintMasks[i].tex == null) TryApplyPaintMask(i); }
+            try
+            {
+                var (mr, tex, name) = _paintMasks[i];
+                if (tex == null) TryApplyPaintMask(i);
+                else DoSetPaintMask(mr, tex);
+            }
             catch { _paintMasks.RemoveAt(i); }
         }
     }
@@ -231,6 +258,97 @@ static class MeshReplacer
         }
     }
 
+    static void RegisterMatSlots(MeshRenderer mr, string[] names)
+    {
+        for (int i = 0; i < _matSlots.Count; i++)
+        {
+            try { if (_matSlots[i].mr == mr) { _matSlots[i] = (mr, names); TryApplyMatSlots(i); return; } }
+            catch { _matSlots.RemoveAt(i--); }
+        }
+        _matSlots.Add((mr, names));
+        TryApplyMatSlots(_matSlots.Count - 1);
+    }
+
+    static void TryApplyMatSlots(int i)
+    {
+        var (mr, names) = _matSlots[i];
+        var existing = mr.sharedMaterials;
+        var mats = new Material[names.Length];
+        for (int j = 0; j < names.Length; j++)
+        {
+            if (string.IsNullOrEmpty(names[j]))
+            {
+                // Keep the original material instance in this slot (preserves skin-system references).
+                mats[j] = existing != null && j < existing.Length ? existing[j] : null;
+                continue;
+            }
+            var m = FindMaterial(names[j]);
+            if (m == null) return; // not all resolved yet
+            mats[j] = m;
+        }
+        mr.sharedMaterials = mats;
+        Plugin.L.LogInfo($"[MSLOT] Set {names.Length} slot(s) on '{mr.gameObject.name}'");
+        _matSlots.RemoveAt(i);
+    }
+
+    public static void FixMatSlots()
+    {
+        for (int i = _matSlots.Count - 1; i >= 0; i--)
+        {
+            try { TryApplyMatSlots(i); }
+            catch { _matSlots.RemoveAt(i); }
+        }
+    }
+
+    static Material? FindMaterial(string name)
+    {
+        if (_matCache.TryGetValue(name, out var cached)) return cached;
+        var all = Resources.FindObjectsOfTypeAll<Material>();
+        Material? found = null;
+        if (all != null)
+            foreach (var m in all)
+                try { if (m?.name == name) { found = m; break; } } catch { }
+        if (found != null) _matCache[name] = found;
+        else Plugin.L.LogWarning($"[MSLOT] Material '{name}' not found in Resources");
+        return found;
+    }
+
+    // Inserts a wrapper GO between the target and its parent so EngineAnimator (or any other
+    // per-frame animator on the target GO) can freely set localRotation on the child while our
+    // orientation lives on the parent wrapper and is never overwritten.
+    static void ApplyWithWrapper(GameObject go, float[]? posArr, float[]? rotArr)
+    {
+        const string prefix = "MR_Wrap_";
+        var rot = rotArr != null
+            ? Quaternion.Euler(rotArr[0], rotArr[1], rotArr[2])
+            : go.transform.localRotation;
+        var pos = posArr != null
+            ? new Vector3(posArr[0], posArr[1], posArr[2])
+            : go.transform.localPosition;
+
+        var parent = go.transform.parent;
+
+        // Already wrapped by a previous Apply call?
+        if (parent != null && parent.name == prefix + go.name)
+        {
+            parent.localPosition = pos;
+            parent.localRotation = rot;
+            Plugin.L.LogInfo($"[MESH] Wrapper updated: '{go.name}' pos=({pos.x:F3},{pos.y:F3},{pos.z:F3}) rot=({rotArr?[0]},{rotArr?[1]},{rotArr?[2]})");
+            return;
+        }
+
+        var wrapper = new GameObject(prefix + go.name);
+        wrapper.transform.SetParent(parent, false);
+        wrapper.transform.localPosition = pos;
+        wrapper.transform.localRotation = rot;
+        wrapper.transform.localScale    = Vector3.one;
+        go.transform.SetParent(wrapper.transform, false);
+        go.transform.localPosition = Vector3.zero;
+        go.transform.localRotation = Quaternion.identity;
+        go.transform.localScale    = Vector3.one;
+        Plugin.L.LogInfo($"[MESH] Wrapper created for '{go.name}' pos=({pos.x:F3},{pos.y:F3},{pos.z:F3}) rot=({rotArr?[0]},{rotArr?[1]},{rotArr?[2]})");
+    }
+
     static void RegisterFixer(MeshRenderer mr, int slots)
     {
         for (int i = 0; i < _fixers.Count; i++)
@@ -246,6 +364,18 @@ static class MeshReplacer
 
     static Mesh? GetMesh(MeshEntry entry, string folderPath)
     {
+        if (entry.GameMesh != null)
+        {
+            string gKey = $"game|{entry.GameMesh}";
+            if (_cache.TryGetValue(gKey, out var gm) && gm != null) return gm;
+            var all = Resources.FindObjectsOfTypeAll<Mesh>();
+            if (all != null)
+                foreach (var m in all)
+                    try { if (m?.name == entry.GameMesh) { _cache[gKey] = m; Plugin.L.LogInfo($"[MESH] Game mesh '{m.name}' verts={m.vertexCount}"); return m; } } catch { }
+            Plugin.L.LogWarning($"[MESH] Game mesh '{entry.GameMesh}' not found in Resources");
+            return null;
+        }
+
         string cacheKey = $"{folderPath}|{entry.Bundle}";
         if (_cache.TryGetValue(cacheKey, out var cached)) return cached;
 

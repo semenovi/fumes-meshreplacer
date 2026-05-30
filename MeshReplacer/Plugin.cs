@@ -107,6 +107,7 @@ static class VehicleUpdatePatch
         _lastRunFrame = frame;
 
         MeshReplacer.FixMaterialSlots();
+        MeshReplacer.FixMatSlots();
         MeshReplacer.FixPaintMasks();
         MeshReplacer.FixAlbedos();
 

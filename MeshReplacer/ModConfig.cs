@@ -4,11 +4,23 @@ using System.Text.Json;
 
 public class MeshEntry
 {
-    public string   Bundle           { get; set; } = "";
-    public string[] Candidates       { get; set; } = Array.Empty<string>();
-    public string   Target           { get; set; } = "";
-    public bool     IsBody           { get; set; }
-    public bool     FixMaterialSlots { get; set; }
+    public string    Bundle           { get; set; } = "";
+    public string[]  Candidates       { get; set; } = Array.Empty<string>();
+    public string    Target           { get; set; } = "";
+    public bool      IsBody           { get; set; }
+    public bool      FixMaterialSlots { get; set; }
+    // Load mesh by name from game Resources instead of a bundle file.
+    public string?   GameMesh         { get; set; }
+    // Assign exact material slots by name (looked up from game Resources).
+    public string[]? MaterialSlots    { get; set; }
+    // Override the target GO's localPosition / localRotation (Euler XYZ) / localScale after mesh replacement.
+    public float[]?  TargetPosition   { get; set; }
+    public float[]?  TargetRotation   { get; set; }
+    public float[]?  TargetScale      { get; set; }
+    // Skip registering paint mask / albedo overrides for this entry.
+    public bool      SkipTextures     { get; set; }
+    // Skip only the paint mask override; albedo (_MainTex) is still applied.
+    public bool      SkipPaintMask    { get; set; }
 }
 
 public class LampConfig
@@ -44,6 +56,9 @@ public class VehicleBodyConfig
     public string?       FrontLampBulbGoName     { get; set; }
     public float[]?      FrontLampBulbPosition   { get; set; }
     public float[]?      FrontLampBulbScale      { get; set; }
+    public float[]?      LicensePlatePosition    { get; set; }
+    public float[]?      LicensePlateRotation    { get; set; }
+    public float[]?      LicensePlateScale       { get; set; }
 }
 
 public class CustomVehicleDef

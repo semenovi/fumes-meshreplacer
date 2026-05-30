@@ -93,6 +93,18 @@ static class VehiclePatcher
                 if (cfg.FrontLampBulbScale    != null) go.transform.localScale    = V3(cfg.FrontLampBulbScale);
             }, "frontLampBulb");
 
+        if (cfg.LicensePlatePosition != null || cfg.LicensePlateRotation != null || cfg.LicensePlateScale != null)
+            Set(() =>
+            {
+                var lp = vb.licensePlate;
+                if (lp == null) { Plugin.L.LogWarning("[MB]   licensePlate component not found"); return; }
+                var t = lp.transform;
+                if (cfg.LicensePlatePosition != null) t.localPosition = V3(cfg.LicensePlatePosition);
+                if (cfg.LicensePlateRotation != null) t.localRotation = Quaternion.Euler(V3(cfg.LicensePlateRotation));
+                if (cfg.LicensePlateScale    != null) t.localScale    = V3(cfg.LicensePlateScale);
+                Plugin.L.LogInfo($"[MB]   licensePlate pos={t.localPosition} rot={t.localEulerAngles}");
+            }, "licensePlate");
+
         if (cfg.RoofLampPartGo != null && cfg.RoofLampIndices != null)
             Set(() =>
             {
