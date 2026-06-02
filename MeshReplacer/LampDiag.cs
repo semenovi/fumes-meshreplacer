@@ -91,6 +91,13 @@ static class LampDiag
 
             try
             {
+                IntPtr viewPtr = Marshal.ReadIntPtr(vb.Pointer + 0x78);
+                Plugin.L.LogInfo($"{tag} [VB] view={(viewPtr == IntPtr.Zero ? "null" : $"0x{viewPtr:X}")}");
+            }
+            catch (Exception e) { Plugin.L.LogInfo($"{tag} [VB] view ERR: {e.Message}"); }
+
+            try
+            {
                 var l = vb.frontLampsLight;
                 Plugin.L.LogInfo($"{tag} [VB] frontLampsLight={(l == null ? "null" : $"pos={l.transform.localPosition} int={l.intensity:F3} en={l.enabled}")}");
             }

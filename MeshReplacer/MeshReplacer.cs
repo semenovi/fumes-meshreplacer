@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using Il2CppInterop.Runtime;
+using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using UnityEngine;
 
 static class MeshReplacer
@@ -94,9 +97,155 @@ static class MeshReplacer
             }
         }
 
+        // InitLampsMeshes was called by RuntimeInit with the ORIGINAL mesh → bake data is stale.
+        // Must call InitMeshData first (updates part.mesh = mf.sharedMesh = our new mesh),
+        // then InitLampsMeshes (reads part.mesh → rebuilds bake buffer from our new mesh).
+        // Without InitMeshData first, InitLampsMeshes would reset mf.sharedMesh back to the old mesh!
+        RebuildVehicleBodyLampMeshData(vehicleRoot);
+
         SyncLampMaterials(vehicleRoot, def);
         LogVehicleState(vehicleRoot, def);
         VehiclePatcher.Apply(vehicleRoot, def);
+
+        // lampPositionsBuffer (VehicleBody+0x180) is a private ComputeBuffer that is NOT copied by
+        // Instantiate. It was created in RuntimeInit→InitPrefab→InitLamps on the runtimePrefab, so
+        // it's null on every spawned instance.  Calling InitLamps() here recreates it from the
+        // current vb.lamps[] (already patched by VehiclePatcher) and presumably calls
+        // SetBuffer("_LampsPositions", ...) on the front/rear lamp materials — enabling mesh emission.
+        ReinitLampPositionsBuffer(vehicleRoot);
+
+        if (def.VehicleBody?.Lamps != null)
+            UploadLampPositionsBuffer(vehicleRoot);
+    }
+
+    static unsafe void ReinitLampPositionsBuffer(Transform vehicleRoot)
+    {
+        try
+        {
+            var vb = vehicleRoot.GetComponentInChildren<Game.VehicleBody>(true);
+            if (vb == null) return;
+
+            IntPtr klass  = IL2CPP.il2cpp_object_get_class(vb.Pointer);
+            IntPtr method = IL2CPP.il2cpp_class_get_method_from_name(klass, "InitLamps", 0);
+            if (method == IntPtr.Zero)
+            {
+                Plugin.L.LogWarning("[LPOS] InitLamps not found on VehicleBody");
+                return;
+            }
+
+            IntPtr exc = IntPtr.Zero;
+            IL2CPP.il2cpp_runtime_invoke(method, vb.Pointer, null, ref exc);
+            if (exc != IntPtr.Zero) { Plugin.L.LogWarning("[LPOS] InitLamps threw exception"); return; }
+
+            IntPtr cbPtr = Marshal.ReadIntPtr(vb.Pointer + 0x180);
+            Plugin.L.LogInfo($"[LPOS] InitLamps done: lampPositionsBuffer={(cbPtr == IntPtr.Zero ? "null" : $"0x{cbPtr:X}")}");
+        }
+        catch (Exception ex) { Plugin.L.LogWarning($"[LPOS] ReinitLampPositionsBuffer: {ex.Message}"); }
+    }
+
+    static unsafe void RebuildVehicleBodyLampMeshData(Transform vehicleRoot)
+    {
+        try
+        {
+            var vb = vehicleRoot.GetComponentInChildren<Game.VehicleBody>(true);
+            if (vb == null) return;
+
+            IntPtr klass = IL2CPP.il2cpp_object_get_class(vb.Pointer);
+            foreach (var methodName in new[] { "InitMeshData", "InitLampsMeshes" })
+            {
+                IntPtr method = IL2CPP.il2cpp_class_get_method_from_name(klass, methodName, 0);
+                if (method == IntPtr.Zero)
+                {
+                    Plugin.L.LogWarning($"[LMESH] {methodName} not found on VehicleBody");
+                    continue;
+                }
+                IntPtr exc = IntPtr.Zero;
+                IL2CPP.il2cpp_runtime_invoke(method, vb.Pointer, null, ref exc);
+                if (exc != IntPtr.Zero)
+                    Plugin.L.LogWarning($"[LMESH] {methodName} threw exception");
+                else
+                    Plugin.L.LogInfo($"[LMESH] {methodName} OK");
+            }
+        }
+        catch (Exception ex)
+        {
+            Plugin.L.LogWarning($"[LMESH] RebuildVehicleBodyLampMeshData: {ex.Message}");
+        }
+    }
+
+    static unsafe void UploadLampPositionsBuffer(Transform vehicleRoot)
+    {
+        try
+        {
+            var vb = vehicleRoot.GetComponentInChildren<Game.VehicleBody>(true);
+            if (vb == null) return;
+
+            // lampPositionsBuffer is a ComputeBuffer stored at vb+0x180
+            IntPtr cbObjPtr = System.Runtime.InteropServices.Marshal.ReadIntPtr(vb.Pointer + 0x180);
+            if (cbObjPtr == IntPtr.Zero)
+            {
+                Plugin.L.LogWarning("[LPOS] lampPositionsBuffer is null at Awake time");
+                return;
+            }
+
+            var lamps = vb.lamps;
+            if (lamps == null) return;
+            int n = lamps.Count;
+
+            // Buffer stores lamps.Length * Vector3 (3 floats, stride=12)
+            var arr = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<UnityEngine.Vector3>(n);
+            for (int i = 0; i < n; i++)
+            {
+                var lamp = lamps[i];
+                if (lamp == null) continue;
+                arr[i] = lamp.bulbPosition.position; // current (patched) position
+            }
+
+            IntPtr klass  = IL2CPP.il2cpp_object_get_class(cbObjPtr);
+            IntPtr method = IL2CPP.il2cpp_class_get_method_from_name(klass, "SetData", 1);
+            if (method == IntPtr.Zero)
+            {
+                Plugin.L.LogWarning("[LPOS] ComputeBuffer.SetData(1) not found");
+                return;
+            }
+
+            IntPtr exc = IntPtr.Zero;
+            void** args = stackalloc void*[1];
+            args[0] = (void*)arr.Pointer;
+            IL2CPP.il2cpp_runtime_invoke(method, cbObjPtr, args, ref exc);
+
+            if (exc != IntPtr.Zero)
+            {
+                Plugin.L.LogWarning("[LPOS] ComputeBuffer.SetData threw exception");
+                return;
+            }
+            Plugin.L.LogInfo($"[LPOS] Uploaded {n} lamp positions to GPU buffer");
+
+            // Bind the positions buffer globally so the Game/Lamp shader sees it.
+            // The game's normal path (VehicleBody init chain) does this, but for custom
+            // vehicles we must do it explicitly after creating our own lampPositionsBuffer.
+            var cb = new ComputeBuffer(cbObjPtr);
+            int propId = Shader.PropertyToID("_LampsPositions");
+            Shader.SetGlobalBuffer(propId, cb);
+            Plugin.L.LogInfo($"[LPOS] Shader.SetGlobalBuffer('_LampsPositions', 0x{cbObjPtr:X}) done");
+
+            // Also set per-material on every registered lamp material, in case the
+            // shader reads it per-material rather than globally.
+            var frontMats = vb.frontLampsMaterials;
+            var rearMats  = vb.rearlampsMaterials;
+            int setCount  = 0;
+            if (frontMats != null)
+                foreach (var mat in frontMats)
+                    if (mat != null) { mat.SetBuffer("_LampsPositions", cb); setCount++; }
+            if (rearMats != null)
+                foreach (var mat in rearMats)
+                    if (mat != null) { mat.SetBuffer("_LampsPositions", cb); setCount++; }
+            Plugin.L.LogInfo($"[LPOS] SetBuffer('_LampsPositions') on {setCount} lamp materials");
+        }
+        catch (Exception ex)
+        {
+            Plugin.L.LogWarning($"[LPOS] UploadLampPositionsBuffer: {ex.Message}");
+        }
     }
 
     public static void SyncLampMaterialsForVehicle(Transform vehicleRoot)
