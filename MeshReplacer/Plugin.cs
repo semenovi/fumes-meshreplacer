@@ -211,14 +211,14 @@ static class VehicleUpdatePatch
         MeshReplacer.FixMatSlots();
         MeshReplacer.FixPaintMasks();
         MeshReplacer.FixAlbedos();
+        MeshReplacer.UpdateAllLampPositions();
 
         // Periodic LensFlare scan — every 300 frames, only for our custom vehicle
         if (frame - _lastScanFrame > 300)
         {
             try
             {
-                var def = VehicleFactory.GetDefForVehicle(__instance);
-                if (def != null)
+                if (LampDiag.ShouldTrace(__instance))
                 {
                     _lastScanFrame = frame;
                     var root = __instance.transform;
@@ -245,8 +245,7 @@ static class VehicleUpdatePatch
         {
             try
             {
-                var def = VehicleFactory.GetDefForVehicle(__instance);
-                if (def != null)
+                if (LampDiag.ShouldTrace(__instance))
                 {
                     _lastLampDump = frame;
                     LampDiag.Dump(__instance, "LATE");
@@ -279,7 +278,8 @@ static class VehicleAwakePatch
     {
         MeshReplacer.Apply(__instance.transform);
         MeshReplacer.DiagnoseVehicle(__instance);
-        LampDiag.Dump(__instance, "AWAKE");
+        if (LampDiag.ShouldTrace(__instance))
+            LampDiag.Dump(__instance, "AWAKE");
     }
 }
 
@@ -294,7 +294,8 @@ static class VehicleStartPatch
     static void Postfix(Game.Vehicle __instance)
     {
         MeshReplacer.Apply(__instance.transform);
-        LampDiag.Dump(__instance, "START");
+        if (LampDiag.ShouldTrace(__instance))
+            LampDiag.Dump(__instance, "START");
     }
 
     static void DiagnoseForBodyList(Game.Vehicle v)
@@ -408,6 +409,9 @@ static class VehicleBodyInitMaterialsPatch
             // frontLampsMaterials is now freshly populated — apply lamp slot sync
             // before VehicleLampsController.Init() runs so panels are included in the GPUBuffer.
             MeshReplacer.SyncLampMaterialsForVehicle(v.transform);
+            // If skin system re-ran InitMaterials after InitPowerBuffer already registered
+            // old material instances, the new instances need _LampsPowers rebound.
+            MeshReplacer.RebindLampPowersBuffer(v);
         }
         catch { }
         try
@@ -487,7 +491,7 @@ static class VehicleLampsControllerInitPatch
         try
         {
             var v = __instance.vehicle;
-            if (v == null || VehicleFactory.GetDefForVehicle(v) == null) return;
+            if (v == null || !LampDiag.ShouldTrace(v)) return;
             Plugin.L.LogInfo($"[LC-INIT/PRE] === VehicleLampsController.Init() ===");
             LampDiag.Dump(v, "LC-PRE");
         }
@@ -499,7 +503,7 @@ static class VehicleLampsControllerInitPatch
         try
         {
             var v = __instance.vehicle;
-            if (v == null || VehicleFactory.GetDefForVehicle(v) == null) return;
+            if (v == null || !LampDiag.ShouldTrace(v)) return;
             Plugin.L.LogInfo($"[LC-INIT/POST] === Init() complete ===");
             LampDiag.Dump(v, "LC-POST");
         }
@@ -556,6 +560,12 @@ static class VehicleLampsControllerInitPowerBufferPatch
                 }
             }
             catch (Exception e) { Plugin.L.LogInfo($"[LC-POWBUF/POST] ERR: {e.Message}"); }
+
+            // Explicitly bind _LampsPowers to all current lamp materials.
+            // InitPowerBuffer registers materials via GPUBuffer.Register, but if
+            // rearlampsMaterials was populated with instances that differ from what
+            // the renderer currently uses, those won't light up.  Force-rebind here.
+            MeshReplacer.RebindLampPowersBuffer(v);
         }
         catch { }
     }
@@ -570,7 +580,7 @@ static class VehicleLampsControllerInitLampsPatch
         try
         {
             var v = __instance.vehicle;
-            if (v == null || VehicleFactory.GetDefForVehicle(v) == null) return;
+            if (v == null || !LampDiag.ShouldTrace(v)) return;
             Plugin.L.LogInfo($"[LC-INITLAMPS/PRE] called");
         }
         catch { }
@@ -581,7 +591,7 @@ static class VehicleLampsControllerInitLampsPatch
         try
         {
             var v = __instance.vehicle;
-            if (v == null || VehicleFactory.GetDefForVehicle(v) == null) return;
+            if (v == null || !LampDiag.ShouldTrace(v)) return;
             try
             {
                 var vb = v.body;
@@ -603,6 +613,50 @@ static class VehicleLampsControllerInitLampsPatch
                     }
             }
             catch (Exception e) { Plugin.L.LogInfo($"[LC-INITLAMPS/POST] ERR: {e.Message}"); }
+        }
+        catch { }
+    }
+}
+
+[HarmonyPatch(typeof(Game.VehicleLampsController), "UpdateLight")]
+static class VehicleLampsControllerUpdateLightPatch
+{
+    static void Prefix(Game.VehicleLampsController __instance)
+    {
+        try
+        {
+            var v = __instance.vehicle;
+            if (v == null || !LampDiag.ShouldTrace(v)) return;
+            LampDiag.LogLive(v, "UL-PRE");
+        }
+        catch { }
+    }
+
+    static void Postfix(Game.VehicleLampsController __instance)
+    {
+        try
+        {
+            var v = __instance.vehicle;
+            if (v == null || !LampDiag.ShouldTrace(v)) return;
+            LampDiag.LogLive(v, "UL-POST");
+        }
+        catch { }
+    }
+}
+
+[HarmonyPatch(typeof(Game.VehicleLampsController), "UpdateLamps")]
+[HarmonyPatch(new Type[] { typeof(float) })]
+static class VehicleLampsControllerUpdateLampsPatch
+{
+    static void Prefix(Game.VehicleLampsController __instance, float deltaTime)
+    {
+        try
+        {
+            var v = __instance.vehicle;
+            if (v == null || !LampDiag.ShouldTrace(v)) return;
+            if (Time.frameCount % 180 != 0) return;
+            Plugin.L.LogInfo($"[LC-STEP] UpdateLamps dt={deltaTime:F4} frame={Time.frameCount}");
+            LampDiag.LogLive(v, "ULAMPS", force: true);
         }
         catch { }
     }

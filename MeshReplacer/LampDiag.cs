@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 using Il2CppInterop.Runtime;
@@ -32,24 +33,156 @@ using UnityEngine;
 //   VehicleLamp.Power (backing)= 0x58
 static class LampDiag
 {
+    struct LiveSnapshot
+    {
+        public string Signature;
+        public int Frame;
+    }
+
+    static readonly Dictionary<IntPtr, LiveSnapshot> _lastLive = new();
+
+    public static bool ShouldTrace(Game.Vehicle vehicle)
+    {
+        try
+        {
+            string bodyId = vehicle?.config?.body?.Type?.id ?? "";
+            string plate = vehicle?.config?.licensePlate ?? "";
+            if (bodyId == "body-caro-pickup" || bodyId == "body-caro") return true;
+            if (plate == "body-caro-pickup" || plate == "body-caro") return true;
+        }
+        catch { }
+        return false;
+    }
+
+    public static string TraceLabel(Game.Vehicle vehicle)
+    {
+        try
+        {
+            string bodyId = vehicle?.config?.body?.Type?.id ?? "(null-body)";
+            string plate = vehicle?.config?.licensePlate ?? "(null-plate)";
+            return $"body='{bodyId}' plate='{plate}'";
+        }
+        catch { return "body='(err)' plate='(err)'"; }
+    }
+
     public static void Dump(Game.Vehicle vehicle, string phase)
     {
         try
         {
-            if (VehicleFactory.GetDefForVehicle(vehicle) == null) return;
+            if (!ShouldTrace(vehicle)) return;
             string tag = $"[LD/{phase}]";
-            string bodyId = "(?)";
-            try { bodyId = vehicle.config?.body?.Type?.id ?? "(null)"; } catch { }
-            Plugin.L.LogInfo($"{tag} ========= vehicle body='{bodyId}' frame={Time.frameCount} =========");
+            Plugin.L.LogInfo($"{tag} ========= vehicle {TraceLabel(vehicle)} frame={Time.frameCount} =========");
 
             DumpAllRenderers(vehicle.transform, tag);
+            DumpModelRenderer(vehicle, tag);
             DumpVehicleBody(vehicle, tag);
             DumpLampsController(vehicle, tag);
             DumpBodyParts(vehicle.transform, tag);
+            DumpLampMaterials(vehicle, tag);
 
             Plugin.L.LogInfo($"{tag} ========= END =========");
         }
         catch (Exception e) { Plugin.L.LogWarning($"[LD/ERR] Dump({phase}): {e.Message}"); }
+    }
+
+    public static void LogLive(Game.Vehicle vehicle, string phase, bool force = false)
+    {
+        try
+        {
+            if (!ShouldTrace(vehicle)) return;
+            var vb = vehicle.body;
+            var lc = vehicle.lamps;
+            if (vb == null || lc == null) return;
+
+            var sb = new StringBuilder();
+            sb.Append($"[LL/{phase}] {TraceLabel(vehicle)} frame={Time.frameCount}");
+
+            float frontPower = 0f;
+            float rearPower = 0f;
+            try
+            {
+                unsafe
+                {
+                    frontPower = *(float*)(lc.Pointer + 0x48);
+                    rearPower = *(float*)(lc.Pointer + 0x4C);
+                }
+            }
+            catch { }
+            sb.Append($" fp={frontPower:F3} rp={rearPower:F3}");
+
+            try
+            {
+                sb.Append($" vbRear={vb.rearLampsColor}");
+                sb.Append($" vbFront={vb.frontLampsColor}");
+            }
+            catch { }
+
+            try
+            {
+                var rmats = vb.rearlampsMaterials;
+                if (rmats != null && rmats.Count > 0 && rmats[0] != null)
+                {
+                    var rmat = rmats[0];
+                    sb.Append($" rmat='{rmat.name}'");
+                    if (rmat.HasProperty("_BulbColor"))
+                        sb.Append($" bulb={rmat.GetColor("_BulbColor")}");
+                    if (rmat.HasProperty("_ClearCoatColor"))
+                        sb.Append($" coat={rmat.GetColor("_ClearCoatColor")}");
+                    if (rmat.HasProperty("_BulbRadius"))
+                        sb.Append($" radius={rmat.GetFloat("_BulbRadius"):F3}");
+                    if (rmat.HasProperty("_BulbDepth"))
+                        sb.Append($" depth={rmat.GetFloat("_BulbDepth"):F3}");
+                    if (rmat.HasProperty("_BulbRadiusRear"))
+                        sb.Append($" rearRadius={rmat.GetFloat("_BulbRadiusRear"):F3}");
+                    if (rmat.HasProperty("_BulbRadiusFront"))
+                        sb.Append($" frontRadius={rmat.GetFloat("_BulbRadiusFront"):F3}");
+                    if (rmat.HasProperty("_AlbedoTexture"))
+                    {
+                        var tex = rmat.GetTexture("_AlbedoTexture");
+                        sb.Append($" alb='{tex?.name ?? "null"}'");
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                var lamps = vb.lamps;
+                if (lamps != null)
+                {
+                    for (int i = 0; i < lamps.Length; i++)
+                    {
+                        var lamp = lamps[i];
+                        if (lamp == null || lamp.isFront) continue;
+                        var bulb = Vector3.zero;
+                        try { bulb = lamp.bulbPosition.position; } catch { }
+                        string lColor = "?";
+                        try { lColor = lamp.Color.ToString(); } catch { }
+                        float lPower = 0f;
+                        try { lPower = lamp.Power; } catch { }
+                        sb.Append($" L{i}:p={lPower:F3} c={lColor} bulb=({bulb.x:F3},{bulb.y:F3},{bulb.z:F3})");
+                        try
+                        {
+                            var lf = lamp.lensFlare;
+                            if (lf != null)
+                                sb.Append($" lf=({lf.intensity:F3},{lf.Color})");
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+
+            string signature = sb.ToString();
+            IntPtr key = vehicle.Pointer;
+            if (!force && _lastLive.TryGetValue(key, out var last) &&
+                last.Signature == signature && Time.frameCount - last.Frame < 300)
+                return;
+
+            _lastLive[key] = new LiveSnapshot { Signature = signature, Frame = Time.frameCount };
+            Plugin.L.LogInfo(signature);
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"[LL/ERR] {phase}: {e.Message}"); }
     }
 
     static void DumpAllRenderers(Transform root, string tag)
@@ -102,6 +235,12 @@ static class LampDiag
                 Plugin.L.LogInfo($"{tag} [VB] frontLampsLight={(l == null ? "null" : $"pos={l.transform.localPosition} int={l.intensity:F3} en={l.enabled}")}");
             }
             catch (Exception e) { Plugin.L.LogInfo($"{tag} [VB] frontLampsLight ERR: {e.Message}"); }
+
+            try
+            {
+                Plugin.L.LogInfo($"{tag} [VB] frontLampsColor={vb.frontLampsColor} rearLampsColor={vb.rearLampsColor}");
+            }
+            catch (Exception e) { Plugin.L.LogInfo($"{tag} [VB] lamp colors ERR: {e.Message}"); }
 
             try
             {
@@ -161,12 +300,27 @@ static class LampDiag
                             string shaftStr = "null";
                             try { var s = lamp.shaft; shaftStr = s == null ? "null" : $"'{s.gameObject.name}'"; } catch { }
                             string lfStr = "null";
-                            try { var lf = lamp.lensFlare; lfStr = lf == null ? "null" : $"'{lf.gameObject.name}' act={lf.gameObject.activeSelf} en={lf.enabled}"; } catch { }
+                            try
+                            {
+                                var lf = lamp.lensFlare;
+                                if (lf == null) lfStr = "null";
+                                else
+                                {
+                                    string colorStr = "?";
+                                    string matStr = "?";
+                                    try { colorStr = lf.Color.ToString(); } catch { }
+                                    try { matStr = lf.Material == null ? "null" : $"'{lf.Material.name}' shader='{lf.Material.shader?.name}'"; } catch { }
+                                    lfStr = $"'{lf.gameObject.name}' act={lf.gameObject.activeSelf} en={lf.enabled} local={lf.transform.localPosition} world={lf.transform.position} intensity={lf.intensity:F3} color={colorStr} mat={matStr}";
+                                }
+                            }
+                            catch { }
                             float power = 0f;
                             try { power = lamp.Power; } catch { }
+                            string lampColor = "?";
+                            try { lampColor = lamp.Color.ToString(); } catch { }
                             var bulb = Vector3.zero;
                             try { bulb = lamp.bulbPosition.position; } catch { }
-                            Plugin.L.LogInfo($"{tag} [VB]   lamp[{i}] isFront={lamp.isFront} power={power:F3} bulb=({bulb.x:F3},{bulb.y:F3},{bulb.z:F3})");
+                            Plugin.L.LogInfo($"{tag} [VB]   lamp[{i}] isFront={lamp.isFront} power={power:F3} color={lampColor} bulb=({bulb.x:F3},{bulb.y:F3},{bulb.z:F3})");
                             Plugin.L.LogInfo($"{tag} [VB]         part={partStr} shaft={shaftStr} lf={lfStr}");
                         }
                         catch (Exception e) { Plugin.L.LogInfo($"{tag} [VB]   lamp[{i}] ERR: {e.Message}"); }
@@ -176,6 +330,92 @@ static class LampDiag
             catch (Exception e) { Plugin.L.LogInfo($"{tag} [VB] lamps ERR: {e.Message}"); }
         }
         catch (Exception e) { Plugin.L.LogWarning($"{tag} [VB] ERR: {e.Message}"); }
+    }
+
+    static void DumpModelRenderer(Game.Vehicle vehicle, string tag)
+    {
+        try
+        {
+            var root = vehicle.transform;
+            if (root == null) return;
+
+            var model = MeshReplacer.FindInHierarchy(root, "CaroModel");
+            if (model == null)
+            {
+                Plugin.L.LogInfo($"{tag} [CM] CaroModel not found");
+                return;
+            }
+
+            var mr = model.GetComponent<MeshRenderer>();
+            var mf = model.GetComponent<MeshFilter>();
+            if (mr == null || mf == null)
+            {
+                Plugin.L.LogInfo($"{tag} [CM] mr={(mr != null)} mf={(mf != null)}");
+                return;
+            }
+
+            var mesh = mf.sharedMesh;
+            Plugin.L.LogInfo($"{tag} [CM] mesh='{mesh?.name ?? "null"}' ptr=0x{(mesh != null ? mesh.Pointer.ToString("X") : "0")} subMeshes={mesh?.subMeshCount ?? -1} verts={mesh?.vertexCount ?? -1}");
+            Plugin.L.LogInfo($"{tag} [CM] localPos={model.transform.localPosition} localRot={model.transform.localRotation.eulerAngles} localScale={model.transform.localScale}");
+            try
+            {
+                var b = mesh != null ? mesh.bounds : default;
+                Plugin.L.LogInfo($"{tag} [CM] meshBounds center={b.center} size={b.size}");
+            }
+            catch { }
+            try
+            {
+                var b = mr.bounds;
+                Plugin.L.LogInfo($"{tag} [CM] rendererBounds center={b.center} size={b.size}");
+            }
+            catch { }
+
+            var mats = mr.sharedMaterials;
+            Plugin.L.LogInfo($"{tag} [CM] sharedMaterials={(mats == null ? "null" : mats.Length.ToString())}");
+            if (mats != null)
+                for (int i = 0; i < mats.Length; i++)
+                    Plugin.L.LogInfo($"{tag} [CM]   slot[{i}]='{mats[i]?.name ?? "null"}'(0x{(mats[i] != null ? mats[i].Pointer.ToString("X") : "0")})");
+
+            for (int slot = 0; slot < (mats?.Length ?? 0); slot++)
+                DumpRendererPropertyBlock(mr, slot, $"{tag} [CM/MPB{slot}]");
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"{tag} [CM] ERR: {e.Message}"); }
+    }
+
+    static void DumpRendererPropertyBlock(MeshRenderer mr, int slot, string tag)
+    {
+        try
+        {
+            var block = new MaterialPropertyBlock();
+            mr.GetPropertyBlock(block, slot);
+
+            string mainTex = DescribeTex(block, "_MainTex");
+            string albedoTex = DescribeTex(block, "_AlbedoTex");
+            string albedoTexture = DescribeTex(block, "_AlbedoTexture");
+            string baseMap = DescribeTex(block, "_BaseMap");
+            string paintMask = DescribeTex(block, "_PaintMaskTexture");
+            var color = SafeGetColor(block, "_Color");
+            var emission = SafeGetColor(block, "_EmissionColor");
+
+            Plugin.L.LogInfo($"{tag} _MainTex={mainTex} _AlbedoTex={albedoTex} _AlbedoTexture={albedoTexture} _BaseMap={baseMap} _PaintMaskTexture={paintMask} _Color={color} _EmissionColor={emission}");
+        }
+        catch (Exception e) { Plugin.L.LogInfo($"{tag} ERR: {e.Message}"); }
+    }
+
+    static string DescribeTex(MaterialPropertyBlock block, string prop)
+    {
+        try
+        {
+            var tex = block.GetTexture(prop);
+            return tex == null ? "null" : $"'{tex.name}'";
+        }
+        catch { return "ERR"; }
+    }
+
+    static string SafeGetColor(MaterialPropertyBlock block, string prop)
+    {
+        try { return block.GetColor(prop).ToString(); }
+        catch { return "ERR"; }
     }
 
     static void DumpLampsController(Game.Vehicle vehicle, string tag)
@@ -225,8 +465,108 @@ static class LampDiag
                 }
             }
             catch (Exception e) { Plugin.L.LogInfo($"{tag} [LC] powersBuffer ERR: {e.Message}"); }
+
+            try
+            {
+                IntPtr vbPtr = Marshal.ReadIntPtr(vehicle.Pointer + 0xF0);
+                if (vbPtr != IntPtr.Zero)
+                {
+                    IntPtr posBufPtr = Marshal.ReadIntPtr(vbPtr + 0x180);
+                    Plugin.L.LogInfo($"{tag} [LC] lampPositionsBuffer={(posBufPtr == IntPtr.Zero ? "null" : $"0x{posBufPtr:X}")}");
+                }
+            }
+            catch (Exception e) { Plugin.L.LogInfo($"{tag} [LC] lampPositionsBuffer ERR: {e.Message}"); }
         }
         catch (Exception e) { Plugin.L.LogWarning($"{tag} [LC] ERR: {e.Message}"); }
+    }
+
+    static void DumpLampMaterials(Game.Vehicle vehicle, string tag)
+    {
+        try
+        {
+            var vb = vehicle.body;
+            if (vb == null) return;
+
+            try
+            {
+                var fmats = vb.frontLampsMaterials;
+                if (fmats != null)
+                    for (int i = 0; i < fmats.Count; i++)
+                        DumpMaterialState(fmats[i], $"{tag} [LMAT/F{i}]");
+            }
+            catch (Exception e) { Plugin.L.LogInfo($"{tag} [LMAT] front ERR: {e.Message}"); }
+
+            try
+            {
+                var rmats = vb.rearlampsMaterials;
+                if (rmats != null)
+                    for (int i = 0; i < rmats.Count; i++)
+                        DumpMaterialState(rmats[i], $"{tag} [LMAT/R{i}]");
+            }
+            catch (Exception e) { Plugin.L.LogInfo($"{tag} [LMAT] rear ERR: {e.Message}"); }
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"{tag} [LMAT] ERR: {e.Message}"); }
+    }
+
+    static void DumpMaterialState(Material? mat, string tag)
+    {
+        try
+        {
+            if (mat == null) { Plugin.L.LogInfo($"{tag} null"); return; }
+            var shaderName = mat.shader != null ? mat.shader.name : "null";
+            Plugin.L.LogInfo($"{tag} '{mat.name}' ptr=0x{mat.Pointer:X} shader='{shaderName}'");
+
+            DumpTex(mat, tag, "_MainTex");
+            DumpTex(mat, tag, "_AlbedoTex");
+            DumpTex(mat, tag, "_AlbedoTexture");
+            DumpTex(mat, tag, "_BaseMap");
+
+            DumpColor(mat, tag, "_Color");
+            DumpColor(mat, tag, "_EmissionColor");
+            DumpColor(mat, tag, "_BulbColor");
+            DumpColor(mat, tag, "_ClearCoatColor");
+
+            DumpFloat(mat, tag, "_Emission");
+            DumpFloat(mat, tag, "_Intensity");
+            DumpFloat(mat, tag, "_Blur");
+            DumpFloat(mat, tag, "_Fade");
+            DumpFloat(mat, tag, "_BulbRadius");
+            DumpFloat(mat, tag, "_BulbDepth");
+            DumpFloat(mat, tag, "_BulbRadiusRear");
+            DumpFloat(mat, tag, "_BulbRadiusFront");
+        }
+        catch (Exception e) { Plugin.L.LogInfo($"{tag} ERR: {e.Message}"); }
+    }
+
+    static void DumpTex(Material mat, string tag, string prop)
+    {
+        try
+        {
+            if (!mat.HasProperty(prop)) return;
+            var tex = mat.GetTexture(prop);
+            Plugin.L.LogInfo($"{tag} {prop}={(tex == null ? "null" : $"'{tex.name}'")}");
+        }
+        catch { }
+    }
+
+    static void DumpColor(Material mat, string tag, string prop)
+    {
+        try
+        {
+            if (!mat.HasProperty(prop)) return;
+            Plugin.L.LogInfo($"{tag} {prop}={mat.GetColor(prop)}");
+        }
+        catch { }
+    }
+
+    static void DumpFloat(Material mat, string tag, string prop)
+    {
+        try
+        {
+            if (!mat.HasProperty(prop)) return;
+            Plugin.L.LogInfo($"{tag} {prop}={mat.GetFloat(prop):F3}");
+        }
+        catch { }
     }
 
     static void DumpBodyParts(Transform root, string tag)
