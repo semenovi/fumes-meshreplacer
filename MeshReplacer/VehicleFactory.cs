@@ -90,8 +90,21 @@ static class VehicleFactory
             // Patch hardpoints on the clone — this is safe because it's a new object.
             PatchHardpoints(clone, def);
 
-            try { bodies.Add(clone); } catch (Exception e) { Plugin.L.LogError($"[VF] bodies.Add: {e.Message}"); continue; }
-            try { Game.ItemDatabase.RegisterItemType(clone); } catch { }
+            // RegisterItemType adds the clone to ItemDatabase.Bodies AND the ItemsById dict.
+            // Do NOT also call bodies.Add(clone) — the duplicate entry crashes
+            // SkinIconBaker.SpawnBodies (Dictionary.Add duplicate key), which kills the
+            // SkinBaker coroutine mid-bake → pixelated skins, broken compass/aiming.
+            try { Game.ItemDatabase.RegisterItemType(clone); } catch (Exception e) { Plugin.L.LogWarning($"[VF] RegisterItemType: {e.Message}"); }
+
+            int occurrences = 0;
+            for (int i = 0; i < bodies.Count; i++)
+                try { if (bodies[i]?.Pointer == clone.Pointer) occurrences++; } catch { }
+            if (occurrences == 0)
+            {
+                try { bodies.Add(clone); occurrences = 1; }
+                catch (Exception e) { Plugin.L.LogError($"[VF] bodies.Add: {e.Message}"); continue; }
+            }
+            Plugin.L.LogInfo($"[VF] clone '{def.Id}' present in Bodies x{occurrences}");
 
             _defs[def.Id] = def;
             _clones.Add(clone);

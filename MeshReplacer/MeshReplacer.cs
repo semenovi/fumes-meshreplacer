@@ -36,6 +36,10 @@ static class MeshReplacer
     // mr + cached resolved Texture (null = not yet found); applied once via MPB
     static readonly List<(MeshRenderer mr, Texture? tex, string name)>              _paintMasks = new();
     static readonly List<(MeshRenderer mr, Texture? tex, string name, bool isBody)> _albedos    = new();
+    // renderers that have already had per-slot MPB applied (one-time, skin system doesn't touch per-slot)
+    static readonly HashSet<MeshRenderer> _albedoSlotsApplied = new();
+    // frame of last FindObjectsOfTypeAll retry (throttled to avoid per-frame stall)
+    static int _textureRetryFrame = -1000;
     static readonly List<Transform>                                                 _lampVehicles = new();
 
     public static void Apply(Transform vehicleRoot)
@@ -806,6 +810,7 @@ static class MeshReplacer
     // Instead, apply _AlbedoTexture via per-material MPB for rear lamp slots only.
     static void DoSetAlbedo(MeshRenderer mr, Texture tex, bool isBody)
     {
+        // Renderer-level _MainTex: set every frame to override skin system's material.SetTexture().
         var block = new MaterialPropertyBlock();
         mr.GetPropertyBlock(block);
         block.SetTexture("_MainTex", tex);
@@ -813,9 +818,10 @@ static class MeshReplacer
 
         if (!isBody) return;
 
-        // Rear lamp material stores albedo in _AlbedoTexture (Game/Lamp shader).
-        // The skin system applies a material-level albedo that may look wrong for our vehicle.
-        // Use per-material MPB to override only the rear lamp slot.
+        // Per-slot _AlbedoTexture: skin system does not touch per-slot MPB, so once is enough.
+        if (_albedoSlotsApplied.Contains(mr)) return;
+        _albedoSlotsApplied.Add(mr);
+
         try
         {
             var mats = mr.sharedMaterials;
@@ -830,7 +836,7 @@ static class MeshReplacer
                 mr.GetPropertyBlock(slotBlock, slot);
                 slotBlock.SetTexture("_AlbedoTexture", tex);
                 mr.SetPropertyBlock(slotBlock, slot);
-                Plugin.L.LogInfo($"[ALB]   rear lamp slot[{slot}] '{mname}' _AlbedoTexture -> '{tex.name}'");
+                Plugin.L.LogInfo($"[ALB] per-slot[{slot}] '{mname}' _AlbedoTexture -> '{tex.name}'");
             }
         }
         catch (Exception e) { Plugin.L.LogWarning($"[ALB] per-slot: {e.Message}"); }
@@ -838,12 +844,15 @@ static class MeshReplacer
 
     public static void FixAlbedos()
     {
+        bool doRetry = Time.frameCount - _textureRetryFrame > 300;
+        if (doRetry) _textureRetryFrame = Time.frameCount;
+
         for (int i = _albedos.Count - 1; i >= 0; i--)
         {
             try
             {
                 var (mr, tex, name, isBody) = _albedos[i];
-                if (tex == null) TryApplyAlbedo(i);
+                if (tex == null) { if (doRetry) TryApplyAlbedo(i); }
                 else DoSetAlbedo(mr, tex, isBody);
             }
             catch { _albedos.RemoveAt(i); }
@@ -852,12 +861,14 @@ static class MeshReplacer
 
     public static void FixPaintMasks()
     {
+        bool doRetry = Time.frameCount - _textureRetryFrame > 300;
+
         for (int i = _paintMasks.Count - 1; i >= 0; i--)
         {
             try
             {
                 var (mr, tex, name) = _paintMasks[i];
-                if (tex == null) TryApplyPaintMask(i);
+                if (tex == null) { if (doRetry) TryApplyPaintMask(i); }
                 else DoSetPaintMask(mr, tex);
             }
             catch { _paintMasks.RemoveAt(i); }

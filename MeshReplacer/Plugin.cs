@@ -63,6 +63,22 @@ static class ItemDatabasePatch
     static void Postfix() => VehicleFactory.InjectBodies();
 }
 
+// Safety net: SkinIconBaker.SpawnBodies iterates ItemDatabase.Bodies and dies on the first
+// exception in SpawnBody (e.g. Dictionary duplicate key), leaving its body->vehicle dict
+// incomplete. Any subsequent Bake on a missing body throws KeyNotFound and kills the
+// SkinBaker coroutine mid-bake — skins stay unbaked (pixelated) and the broken render
+// state takes the compass/aiming with it. Suppress the exception so the loop continues.
+[HarmonyPatch(typeof(Game.SkinIconBaker), "SpawnBody")]
+static class SkinIconBakerSpawnBodyPatch
+{
+    static Exception? Finalizer(Exception? __exception, Game.BodyType body)
+    {
+        if (__exception != null)
+            Plugin.L.LogWarning($"[VF] SkinIconBaker.SpawnBody('{body?.id}') threw: {__exception.Message} (suppressed)");
+        return null;
+    }
+}
+
 // Append custom clones to PlayableBodies so they appear in the garage Body list UI.
 // PopulateBodies() uses ItemDatabase.PlayableBodies (backed by ItemDatabaseConfig.playableBodies
 // — a serialized asset array that never includes our runtime clones).
