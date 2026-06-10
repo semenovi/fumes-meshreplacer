@@ -138,6 +138,11 @@ static class MeshReplacer
         // Without InitMeshData first, InitLampsMeshes would reset mf.sharedMesh back to the old mesh!
         RebuildVehicleBodyLampMeshData(vehicleRoot);
 
+        // InitLampsMeshes may replace mf.sharedMesh with a native clone that lacks UV1 (TEXCOORD1).
+        // Re-apply our AssetBundle body mesh so the renderer always uses the UV1-containing mesh.
+        // The physics bake buffer (built by InitLampsMeshes) is for deformation only, not rendering.
+        ReapplyBodyMesh(vehicleRoot, def, markerGo);
+
         SyncLampMaterials(vehicleRoot, def);
         ApplyLampShaderExperiments(vehicleRoot, def);
         LogVehicleState(vehicleRoot, def);
@@ -431,6 +436,29 @@ static class MeshReplacer
             Plugin.L.LogInfo($"[LPOS] InitLamps done: lampPositionsBuffer={(cbPtr == IntPtr.Zero ? "null" : $"0x{cbPtr:X}")}");
         }
         catch (Exception ex) { Plugin.L.LogWarning($"[LPOS] ReinitLampPositionsBuffer: {ex.Message}"); }
+    }
+
+    static void ReapplyBodyMesh(Transform vehicleRoot, CustomVehicleDef def, GameObject markerGo)
+    {
+        foreach (var entry in def.MeshReplacements)
+        {
+            if (!entry.IsBody) continue;
+            var mesh = GetMesh(entry, def.FolderPath);
+            if (mesh == null) continue;
+            var targetGo = entry.Target == def.VehicleMarker
+                ? markerGo
+                : FindInHierarchy(markerGo.transform, entry.Target);
+            if (targetGo == null) continue;
+            var mf = targetGo.GetComponent<MeshFilter>();
+            if (mf == null) continue;
+            var current = mf.sharedMesh;
+            if (current == mesh) continue;
+            Plugin.L.LogInfo($"[MESH] ReapplyBody '{entry.Target}': '{current?.name}' -> '{mesh.name}' (UV1 restore after InitLampsMeshes)");
+            mf.sharedMesh = mesh;
+            // Also update SkinnedMeshRenderer if present.
+            var smr = targetGo.GetComponent<SkinnedMeshRenderer>();
+            if (smr != null) smr.sharedMesh = mesh;
+        }
     }
 
     static unsafe void RebuildVehicleBodyLampMeshData(Transform vehicleRoot)

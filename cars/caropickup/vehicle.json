@@ -65,10 +65,7 @@
       {"position": [ 0.6, 0.245, 2.618], "scale": [2, 1.30364, 1.4018552]}
     ],
     "roofLampPartGo": "CaroChromeDetails02",
-    "roofLampIndices": [2, 3, 4, 5],
-    "frontLampBulbGoName": "TartarusChromeDetail02",
-    "frontLampBulbPosition": [0, 0.076, -0.867],
-    "frontLampBulbScale": [1.405, 1.0, 1.0]
+    "roofLampIndices": [2, 3, 4, 5]
   },
 
   "availableSuspensions": [
