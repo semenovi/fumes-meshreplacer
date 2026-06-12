@@ -90,6 +90,11 @@ static class VehicleFactory
             // Patch hardpoints on the clone — this is safe because it's a new object.
             PatchHardpoints(clone, def);
 
+            // Replace bakeData with one generated for the custom mesh (gen_bakedata.py).
+            // The inherited stock bakeData maps skin-texture texels to the ORIGINAL mesh
+            // surface/UV, so skins paint scrambled patches on a replaced mesh.
+            ApplyCustomBakeData(clone, def);
+
             // RegisterItemType adds the clone to ItemDatabase.Bodies AND the ItemsById dict.
             // Do NOT also call bodies.Add(clone) — the duplicate entry crashes
             // SkinIconBaker.SpawnBodies (Dictionary.Add duplicate key), which kills the
@@ -111,6 +116,55 @@ static class VehicleFactory
             _bodyMap[def.Id] = (def, clone, baseBody);
             Plugin.L.LogInfo($"[VF] Created body type '{def.Id}' (clone of '{def.BaseBodyId}')");
         }
+    }
+
+    // Loads <vehicle folder>\bakedata.bin (written by gen_bakedata.py) and replaces the
+    // clone's bakeData. File format: 5 sides (top, front, back, right, left), each:
+    // int32 count, then count * { int32 texelIndex; float x, y, z }.
+    static void ApplyCustomBakeData(Game.BodyType clone, CustomVehicleDef def)
+    {
+        var path = System.IO.Path.Combine(def.FolderPath, "bakedata.bin");
+        if (!System.IO.File.Exists(path)) return;
+        try
+        {
+            var bytes = System.IO.File.ReadAllBytes(path);
+            var bake = ScriptableObject.CreateInstance(Il2CppInterop.Runtime.Il2CppType.Of<Game.BodyBakeData>())
+                                       ?.Cast<Game.BodyBakeData>();
+            if (bake == null) { Plugin.L.LogWarning("[VF] CreateInstance<BodyBakeData> returned null"); return; }
+            bake.name = $"{def.Id}BakeData";
+
+            int off = 0, total = 0;
+            for (int side = 0; side < 5; side++)
+            {
+                int n = BitConverter.ToInt32(bytes, off); off += 4;
+                var arr = new Il2CppStructArray<Game.BodyBakeData.Pixel>(n);
+                for (int i = 0; i < n; i++)
+                {
+                    var px = new Game.BodyBakeData.Pixel
+                    {
+                        index = BitConverter.ToInt32(bytes, off),
+                        position = new Vector3(
+                            BitConverter.ToSingle(bytes, off + 4),
+                            BitConverter.ToSingle(bytes, off + 8),
+                            BitConverter.ToSingle(bytes, off + 12)),
+                    };
+                    arr[i] = px;
+                    off += 16;
+                }
+                total += n;
+                switch (side)
+                {
+                    case 0: bake.topPixels   = arr; break;
+                    case 1: bake.frontPixels = arr; break;
+                    case 2: bake.backPixels  = arr; break;
+                    case 3: bake.rightPixels = arr; break;
+                    case 4: bake.leftPixels  = arr; break;
+                }
+            }
+            clone.bakeData = bake;
+            Plugin.L.LogInfo($"[VF] Custom bakeData applied to '{def.Id}': {total} pixels");
+        }
+        catch (Exception e) { Plugin.L.LogError($"[VF] ApplyCustomBakeData: {e}"); }
     }
 
     // Injects save items (Body list) and save configs (Cars list) for custom vehicles.

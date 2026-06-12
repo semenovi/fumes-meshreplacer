@@ -68,10 +68,10 @@ static class MeshReplacer
                         MaterialCycler.Saved = mr.sharedMaterials;
                     MaterialCycler.Renderer = mr;
 
-                    if (def.PaintMaskTextureName != null)
-                        RegisterPaintMask(mr, def.PaintMaskTextureName);
-                    if (def.AlbedoTextureName != null)
-                        RegisterAlbedo(mr, def.AlbedoTextureName, isBody: true);
+                    if (PaintMaskRef(def) != null)
+                        RegisterPaintMask(mr, PaintMaskRef(def)!);
+                    if (AlbedoRef(def) != null)
+                        RegisterAlbedo(mr, AlbedoRef(def)!, isBody: true);
                 }
             }
 
@@ -101,8 +101,8 @@ static class MeshReplacer
                 var mr = targetGo.GetComponent<MeshRenderer>();
                 if (mr != null)
                 {
-                    if (!entry.SkipPaintMask && def.PaintMaskTextureName != null) RegisterPaintMask(mr, def.PaintMaskTextureName);
-                    if (def.AlbedoTextureName != null) RegisterAlbedo(mr, def.AlbedoTextureName, isBody: false);
+                    if (!entry.SkipPaintMask && PaintMaskRef(def) != null) RegisterPaintMask(mr, PaintMaskRef(def)!);
+                    if (AlbedoRef(def) != null) RegisterAlbedo(mr, AlbedoRef(def)!, isBody: false);
                 }
             }
         }
@@ -681,13 +681,66 @@ static class MeshReplacer
         mr.SetPropertyBlock(block);
     }
 
+    // Texture reference: either a game-texture name or "file:<abs path>" for a PNG
+    // shipped in the vehicle folder (patched albedo/paint mask from uv_dedup.py).
+    static string? PaintMaskRef(CustomVehicleDef def)
+        => def.PaintMaskTextureFile != null
+            ? "file:" + System.IO.Path.Combine(def.FolderPath, def.PaintMaskTextureFile)
+            : def.PaintMaskTextureName;
+
+    static string? AlbedoRef(CustomVehicleDef def)
+        => def.AlbedoTextureFile != null
+            ? "file:" + System.IO.Path.Combine(def.FolderPath, def.AlbedoTextureFile)
+            : def.AlbedoTextureName;
+
+    static readonly Dictionary<string, Texture2D?> _fileTextures = new();
+
     static Texture? FindTexture(string name)
     {
+        if (name.StartsWith("file:"))
+            return LoadTextureFile(name.Substring(5));
         var all = Resources.FindObjectsOfTypeAll<Texture2D>();
         if (all == null) return null;
         foreach (var t in all)
             try { if (t.name == name) return t; } catch { }
         return null;
+    }
+
+    static Texture2D? LoadTextureFile(string path)
+    {
+        if (_fileTextures.TryGetValue(path, out var cached) && cached != null)
+            return cached;
+        try
+        {
+            if (!System.IO.File.Exists(path))
+            {
+                Plugin.L.LogWarning($"[TEX] file not found: {path}");
+                _fileTextures[path] = null;
+                return null;
+            }
+            var bytes = System.IO.File.ReadAllBytes(path);
+            // mipChain: true — стоковые текстуры с мипами; Point — пиксель-арт стиль игры
+            var tex = new Texture2D(2, 2, TextureFormat.RGBA32, true);
+            if (!ImageConversion.LoadImage(tex, bytes))
+            {
+                Plugin.L.LogWarning($"[TEX] LoadImage failed: {path}");
+                _fileTextures[path] = null;
+                return null;
+            }
+            tex.filterMode = FilterMode.Point;
+            tex.wrapMode = TextureWrapMode.Repeat;
+            tex.name = System.IO.Path.GetFileNameWithoutExtension(path);
+            tex.hideFlags = HideFlags.HideAndDontSave;   // survive scene loads
+            _fileTextures[path] = tex;
+            Plugin.L.LogInfo($"[TEX] loaded '{tex.name}' {tex.width}x{tex.height} from {path}");
+            return tex;
+        }
+        catch (Exception e)
+        {
+            Plugin.L.LogError($"[TEX] {path}: {e.Message}");
+            _fileTextures[path] = null;
+            return null;
+        }
     }
 
     static void RegisterAlbedo(MeshRenderer mr, string name, bool isBody)

@@ -78,6 +78,12 @@ public class CustomVehicleDef
     public string? PaintMaskTextureName { get; set; }
     public string? AlbedoTextureName    { get; set; }
 
+    // PNG files in the vehicle folder, used instead of the *TextureName lookups.
+    // Needed when the albedo/paint mask are patched copies of a stock texture
+    // (UV de-duplication moves islands and copies their pixels — see uv_dedup.py).
+    public string? PaintMaskTextureFile { get; set; }
+    public string? AlbedoTextureFile    { get; set; }
+
     // Keep the game's InitLampsMeshes-generated body mesh (with runtime-computed lamp
     // index channel) instead of reverting to the bundle mesh with hand-authored UV1.
     // Original game meshes ship WITHOUT UV1 — the lamp index data is generated at

@@ -25,6 +25,10 @@
         <HintPath>$(MSBuildProjectDirectory)\..\libs\UnityEngine.AssetBundleModule.dll</HintPath>
         <Private>false</Private>
       </Reference>
+      <Reference Include="UnityEngine.ImageConversionModule">
+        <HintPath>$(MSBuildProjectDirectory)\..\libs\UnityEngine.ImageConversionModule.dll</HintPath>
+        <Private>false</Private>
+      </Reference>
       <Reference Include="UnityEngine">
         <HintPath>$(MSBuildProjectDirectory)\..\libs\UnityEngine.dll</HintPath>
         <Private>false</Private>

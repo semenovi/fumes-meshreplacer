@@ -4,8 +4,8 @@
   "displayName": "beetle",
   "vehicleMarker": "CricketBodyModel",
 
-  "paintMaskTextureName": "BizonPaintMaskTexture",
-  "albedoTextureName":    "BizonAlbedoTexture",
+  "paintMaskTextureFile": "paintmask.png",
+  "albedoTextureFile":    "albedo.png",
 
   "meshReplacements": [
     {
