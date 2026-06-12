@@ -225,6 +225,7 @@ static class VehicleUpdatePatch
 
         MeshReplacer.FixMaterialSlots();
         MeshReplacer.FixMatSlots();
+        MeshReplacer.FixMeshes();
         MeshReplacer.FixPaintMasks();
         MeshReplacer.FixAlbedos();
         MeshReplacer.UpdateAllLampPositions();
@@ -302,10 +303,32 @@ static class VehicleAwakePatch
 [HarmonyPatch(typeof(Game.Vehicle), "Start")]
 static class VehicleStartPatch
 {
+    // One-shot: dump the runtime lamp index channel (UV2) of a STOCK cricket body.
+    // Original CricketBody assets ship without UV1, so whatever the runtime mesh contains
+    // reveals how the game encodes lamp indices for the Car Lamp shaders.
+    static bool _stockCricketUv2Dumped;
+
     static void Prefix(Game.Vehicle __instance)
     {
         MeshReplacer.DiagnoseVehicle(__instance);
         DiagnoseForBodyList(__instance);
+        DumpStockCricketUv2(__instance);
+    }
+
+    static void DumpStockCricketUv2(Game.Vehicle v)
+    {
+        if (_stockCricketUv2Dumped) return;
+        try
+        {
+            var bodyId = v.config?.body?.Type?.id ?? "";
+            if (bodyId != "body-cricket") return;
+            var go = MeshReplacer.FindInHierarchy(v.transform, "CricketBodyModel");
+            var mf = go?.GetComponent<MeshFilter>();
+            if (mf == null || mf.sharedMesh == null) return;
+            _stockCricketUv2Dumped = true;
+            MeshReplacer.DumpLampUVs(mf.sharedMesh, "[UV2/STOCK-CRICKET]");
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"[UV2/STOCK-CRICKET] {e.Message}"); }
     }
     static void Postfix(Game.Vehicle __instance)
     {

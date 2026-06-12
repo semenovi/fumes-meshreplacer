@@ -36,8 +36,14 @@ static class MeshReplacer
     // mr + cached resolved Texture (null = not yet found); applied once via MPB
     static readonly List<(MeshRenderer mr, Texture? tex, string name)>              _paintMasks = new();
     static readonly List<(MeshRenderer mr, Texture? tex, string name, bool isBody)> _albedos    = new();
-    // renderers that have already had per-slot MPB applied (one-time, skin system doesn't touch per-slot)
-    static readonly HashSet<MeshRenderer> _albedoSlotsApplied = new();
+    // Replaced meshes to re-assert every frame: the game re-clones part meshes at runtime
+    // (deformation/lamp bake), losing our UV channels. (mf, our mesh, target name for logs)
+    static readonly List<(MeshFilter mf, Mesh mesh, string tag)>                    _meshGuards = new();
+    // Renderers with a lamp material slot that are NOT a VehicleBodyPart lamp renderer
+    // (e.g. fender panels). The game's per-frame _LampsPositions dispatch covers only the
+    // renderers it knows about, so these get a world-space buffer via per-renderer MPB.
+    static readonly Dictionary<Transform, List<MeshRenderer>> _lampMpbRenderers = new();
+    static readonly HashSet<Transform> _lampMpbLogged = new();
     // frame of last FindObjectsOfTypeAll retry (throttled to avoid per-frame stall)
     static int _textureRetryFrame = -1000;
     static readonly List<Transform>                                                 _lampVehicles = new();
@@ -141,16 +147,30 @@ static class MeshReplacer
         // then InitLampsMeshes (reads part.mesh → rebuilds bake buffer from our new mesh).
         // Without InitMeshData first, InitLampsMeshes would reset mf.sharedMesh back to the old mesh!
         RebuildVehicleBodyLampMeshData(vehicleRoot);
+        DumpBodyLampUVs(def, markerGo, "[UV2/NATIVE]");
 
-        // InitLampsMeshes may replace mf.sharedMesh with a native clone that lacks UV1 (TEXCOORD1).
-        // Re-apply our AssetBundle body mesh so the renderer always uses the UV1-containing mesh.
-        // The physics bake buffer (built by InitLampsMeshes) is for deformation only, not rendering.
-        ReapplyBodyMesh(vehicleRoot, def, markerGo);
+        if (!def.KeepGameLampMesh)
+        {
+            // InitLampsMeshes may replace mf.sharedMesh with a native clone that lacks UV1 (TEXCOORD1).
+            // Re-apply our AssetBundle body mesh so the renderer always uses the UV1-containing mesh.
+            // The physics bake buffer (built by InitLampsMeshes) is for deformation only, not rendering.
+            ReapplyBodyMesh(vehicleRoot, def, markerGo);
+        }
+        else
+            Plugin.L.LogInfo("[MESH] keepGameLampMesh: keeping InitLampsMeshes-generated body mesh");
 
         SyncLampMaterials(vehicleRoot, def);
         ApplyLampShaderExperiments(vehicleRoot, def);
         LogVehicleState(vehicleRoot, def);
         VehiclePatcher.Apply(vehicleRoot, def);
+
+        if (def.KeepGameLampMesh)
+        {
+            // Re-run the bake AFTER VehiclePatcher so the lamp index channel is computed
+            // from the PATCHED lamp positions (the first bake above used pre-patch ones).
+            RebuildVehicleBodyLampMeshData(vehicleRoot);
+            DumpBodyLampUVs(def, markerGo, "[UV2/REBAKED]");
+        }
 
         // lampPositionsBuffer (VehicleBody+0x180) is a private ComputeBuffer that is NOT copied by
         // Instantiate. It was created in RuntimeInit→InitPrefab→InitLamps on the runtimePrefab, so
@@ -409,11 +429,59 @@ static class MeshReplacer
                 var root = _lampVehicles[i];
                 if (root == null) { _lampVehicles.RemoveAt(i); continue; }
                 UploadLampPositionsBuffer(root, fullBind: false);
+                UpdatePanelLampMPBs(root);
+                ApplyDebugRearPowers(root);
             }
             catch
             {
                 _lampVehicles.RemoveAt(i);
             }
+        }
+    }
+
+    static readonly Dictionary<Transform, ComputeBuffer> _testPowerBuffers = new();
+    static int _debugRearLogFrame = -1000;
+
+    // DEBUG (DebugForceRearPowers): bind an all-ones _LampsPowers buffer to the rear lamp
+    // materials every frame. Isolates "power binding broken" from "index/shader broken".
+    static unsafe void ApplyDebugRearPowers(Transform vehicleRoot)
+    {
+        var def = GetDefForVehicle(vehicleRoot);
+        if (def == null || !def.DebugForceRearPowers) return;
+
+        var vb = vehicleRoot.GetComponentInChildren<Game.VehicleBody>(true);
+        var lamps = vb?.lamps;
+        int n = lamps?.Length ?? 0;
+        if (n == 0) return;
+
+        if (!_testPowerBuffers.TryGetValue(vehicleRoot, out var cb) || cb == null)
+        {
+            cb = new ComputeBuffer(n, 4);
+            var ones = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<float>(n);
+            for (int i = 0; i < n; i++) ones[i] = 1f;
+            IntPtr klass  = IL2CPP.il2cpp_object_get_class(cb.Pointer);
+            IntPtr method = IL2CPP.il2cpp_class_get_method_from_name(klass, "SetData", 1);
+            if (method != IntPtr.Zero)
+            {
+                IntPtr exc = IntPtr.Zero;
+                void** args = stackalloc void*[1];
+                args[0] = (void*)ones.Pointer;
+                IL2CPP.il2cpp_runtime_invoke(method, cb.Pointer, args, ref exc);
+            }
+            _testPowerBuffers[vehicleRoot] = cb;
+            Plugin.L.LogInfo($"[DBGREAR] Created all-ones powers buffer n={n}");
+        }
+
+        int bound = 0;
+        var rmats = vb.rearlampsMaterials;
+        if (rmats != null)
+            foreach (var mat in rmats)
+                if (mat != null) { mat.SetBuffer("_LampsPowers", cb); bound++; }
+
+        if (Time.frameCount - _debugRearLogFrame > 600)
+        {
+            _debugRearLogFrame = Time.frameCount;
+            Plugin.L.LogInfo($"[DBGREAR] all-ones _LampsPowers bound to {bound} rear material(s)");
         }
     }
 
@@ -442,11 +510,63 @@ static class MeshReplacer
         catch (Exception ex) { Plugin.L.LogWarning($"[LPOS] ReinitLampPositionsBuffer: {ex.Message}"); }
     }
 
-    static void ReapplyBodyMesh(Transform vehicleRoot, CustomVehicleDef def, GameObject markerGo)
+    // Dumps the lamp index channel (UV2 = TEXCOORD1) of the body mesh currently on the
+    // renderer. Used to inspect what InitLampsMeshes generated before we revert it.
+    static void DumpBodyLampUVs(CustomVehicleDef def, GameObject markerGo, string tag)
     {
         foreach (var entry in def.MeshReplacements)
         {
             if (!entry.IsBody) continue;
+            var targetGo = entry.Target == def.VehicleMarker
+                ? markerGo
+                : FindInHierarchy(markerGo.transform, entry.Target);
+            var mf = targetGo?.GetComponent<MeshFilter>();
+            if (mf != null) DumpLampUVs(mf.sharedMesh, tag);
+        }
+    }
+
+    public static void DumpLampUVs(Mesh? mesh, string tag)
+    {
+        try
+        {
+            if (mesh == null) { Plugin.L.LogInfo($"{tag} mesh=null"); return; }
+            Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<Vector2>? uv2 = null;
+            try { var a = mesh.uv2; if (a != null && a.Length > 0) uv2 = a; } catch { }
+            Plugin.L.LogInfo($"{tag} mesh='{mesh.name}' verts={mesh.vertexCount} subs={mesh.subMeshCount} uv2.len={(uv2 == null ? "none" : uv2.Length.ToString())}");
+            if (uv2 == null) return;
+            for (int s = 0; s < mesh.subMeshCount; s++)
+            {
+                Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<int>? tris = null;
+                try { tris = mesh.GetTriangles(s); } catch { }
+                if (tris == null || tris.Length == 0)
+                {
+                    Plugin.L.LogInfo($"{tag}   sub[{s}] tris unreadable");
+                    continue;
+                }
+                var xs = new SortedSet<float>();
+                var ys = new SortedSet<float>();
+                foreach (var vi in tris)
+                {
+                    if (vi < 0 || vi >= uv2.Length) continue;
+                    var u = uv2[vi];
+                    xs.Add((float)Math.Round(u.x, 2));
+                    ys.Add((float)Math.Round(u.y, 2));
+                }
+                string xstr = xs.Count <= 12 ? string.Join(",", xs) : $"{xs.Min}..{xs.Max} ({xs.Count} vals)";
+                string ystr = ys.Count <= 12 ? string.Join(",", ys) : $"{ys.Min}..{ys.Max} ({ys.Count} vals)";
+                Plugin.L.LogInfo($"{tag}   sub[{s}] uv2.x=[{xstr}] uv2.y=[{ystr}]");
+            }
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"{tag} ERR: {e.Message}"); }
+    }
+
+    // InitLampsMeshes iterates ALL VehicleBodyParts (body, panels, doors...) and swaps each
+    // part's mf.sharedMesh for a native clone. For our isReadable=false bundle meshes the
+    // clone has no uv2 (lamp indices) — so every replaced mesh must be re-applied, not just isBody.
+    static void ReapplyBodyMesh(Transform vehicleRoot, CustomVehicleDef def, GameObject markerGo)
+    {
+        foreach (var entry in def.MeshReplacements)
+        {
             var mesh = GetMesh(entry, def.FolderPath);
             if (mesh == null) continue;
             var targetGo = entry.Target == def.VehicleMarker
@@ -455,6 +575,7 @@ static class MeshReplacer
             if (targetGo == null) continue;
             var mf = targetGo.GetComponent<MeshFilter>();
             if (mf == null) continue;
+            RegisterMeshGuard(mf, mesh, entry.Target);
             var current = mf.sharedMesh;
             if (current == mesh) continue;
             Plugin.L.LogInfo($"[MESH] ReapplyBody '{entry.Target}': '{current?.name}' -> '{mesh.name}' (UV1 restore after InitLampsMeshes)");
@@ -697,6 +818,8 @@ static class MeshReplacer
         var markerGo = FindInHierarchy(vehicleRoot, def.VehicleMarker);
         if (markerGo == null) return;
 
+        var mpbList = new List<MeshRenderer>();
+
         foreach (var entry in def.MeshReplacements)
         {
             if (!entry.SyncFrontLampSlot || entry.MaterialSlots == null) continue;
@@ -722,6 +845,86 @@ static class MeshReplacer
                 changed = true;
             }
             if (changed) mr.sharedMaterials = mats;
+            mpbList.Add(mr);
+        }
+
+        _lampMpbRenderers[vehicleRoot] = mpbList;
+    }
+
+    // Ground truth (disasm 2026-06-11): there is NO global _LampsPositions. The game binds
+    // VehicleBody.lampPositionsBuffer per-material in VehicleBody.InitInstance (two
+    // Material.SetBuffer calls at 0x1664151/0x1664291), and the Car Lamp shaders do ALL the
+    // bulb math in the RENDERER's OBJECT SPACE (the PS transforms the camera by cb2
+    // unity_WorldToObject of the current draw). The buffer holds body-local coords, so any
+    // lamp renderer whose GO sits at a non-identity local offset (our fender panels at
+    // (±0.6288, 0.537, 1.367)) sees the bulb sphere displaced by exactly that offset.
+    // Stock light bars work only because their GOs sit at localPosition (0,0,0).
+    // Fix: per-renderer MPB buffer with positions converted into THAT renderer's local space.
+    static readonly Dictionary<MeshRenderer, ComputeBuffer> _rendererLampBuffers = new();
+
+    static unsafe void UpdatePanelLampMPBs(Transform vehicleRoot)
+    {
+        try
+        {
+            if (!_lampMpbRenderers.TryGetValue(vehicleRoot, out var list) || list == null || list.Count == 0)
+                return;
+
+            var vb = vehicleRoot.GetComponentInChildren<Game.VehicleBody>(true);
+            var lamps = vb?.lamps;
+            int n = lamps?.Count ?? 0;
+            if (n == 0) return;
+            var bodyTf = vb!.transform;
+
+            int bound = 0;
+            for (int r = list.Count - 1; r >= 0; r--)
+            {
+                try
+                {
+                    var mr = list[r];
+                    if (mr == null) { list.RemoveAt(r); continue; }
+
+                    if (!_rendererLampBuffers.TryGetValue(mr, out var cb) || cb == null || cb.count != n)
+                    {
+                        try { cb?.Release(); } catch { }
+                        cb = new ComputeBuffer(n, 12);
+                        _rendererLampBuffers[mr] = cb;
+                    }
+
+                    // bulbPosition coords live in body space; the shader needs them in the
+                    // renderer's own object space (also keeps the ball glued to a torn-off panel).
+                    var local = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<Vector3>(n);
+                    var rtf = mr.transform;
+                    for (int i = 0; i < n; i++)
+                    {
+                        var lamp = lamps![i];
+                        if (lamp == null) continue;
+                        local[i] = rtf.InverseTransformPoint(bodyTf.TransformPoint(lamp.bulbPosition.position));
+                    }
+
+                    IntPtr klass  = IL2CPP.il2cpp_object_get_class(cb.Pointer);
+                    IntPtr method = IL2CPP.il2cpp_class_get_method_from_name(klass, "SetData", 1);
+                    if (method == IntPtr.Zero) continue;
+                    IntPtr exc = IntPtr.Zero;
+                    void** args = stackalloc void*[1];
+                    args[0] = (void*)local.Pointer;
+                    IL2CPP.il2cpp_runtime_invoke(method, cb.Pointer, args, ref exc);
+                    if (exc != IntPtr.Zero) continue;
+
+                    var block = new MaterialPropertyBlock();
+                    mr.GetPropertyBlock(block);
+                    block.SetBuffer("_LampsPositions", cb);
+                    mr.SetPropertyBlock(block);
+                    bound++;
+                }
+                catch { list.RemoveAt(r); }
+            }
+
+            if (bound > 0 && _lampMpbLogged.Add(vehicleRoot))
+                Plugin.L.LogInfo($"[LMPB] renderer-local _LampsPositions bound via MPB to {bound} renderer(s) on '{vehicleRoot.gameObject.name}'");
+        }
+        catch (Exception ex)
+        {
+            Plugin.L.LogWarning($"[LMPB] {ex.Message}");
         }
     }
 
@@ -818,10 +1021,13 @@ static class MeshReplacer
 
         if (!isBody) return;
 
-        // Per-slot _AlbedoTexture: skin system does not touch per-slot MPB, so once is enough.
-        if (_albedoSlotsApplied.Contains(mr)) return;
-        _albedoSlotsApplied.Add(mr);
-
+        // Rear lamp _AlbedoTexture: set directly on the material instance. The rear lamp
+        // material is a per-vehicle clone (CricketLampRearMaterial(Clone)(Clone)), so this
+        // does not leak to other vehicles. A per-slot MPB is NOT used here: it was the only
+        // beetle-specific difference on the rear lamp slot while rear bulbs didn't render,
+        // and per-material SetBuffer(_LampsPowers/_LampsPositions) interaction with per-slot
+        // MPBs is unverified. Re-applied every frame from FixAlbedos (cheap, idempotent) so
+        // skin-system material re-inits stay covered.
         try
         {
             var mats = mr.sharedMaterials;
@@ -832,14 +1038,12 @@ static class MeshReplacer
                 if (mat == null) continue;
                 var mname = mat.name ?? "";
                 if (!mname.Contains("Lamp") || !mname.Contains("Rear")) continue;
-                var slotBlock = new MaterialPropertyBlock();
-                mr.GetPropertyBlock(slotBlock, slot);
-                slotBlock.SetTexture("_AlbedoTexture", tex);
-                mr.SetPropertyBlock(slotBlock, slot);
-                Plugin.L.LogInfo($"[ALB] per-slot[{slot}] '{mname}' _AlbedoTexture -> '{tex.name}'");
+                if (mat.GetTexture("_AlbedoTexture")?.Pointer == tex.Pointer) continue;
+                mat.SetTexture("_AlbedoTexture", tex);
+                Plugin.L.LogInfo($"[ALB] rear-mat '{mname}' _AlbedoTexture -> '{tex.name}' (direct, slot {slot})");
             }
         }
-        catch (Exception e) { Plugin.L.LogWarning($"[ALB] per-slot: {e.Message}"); }
+        catch (Exception e) { Plugin.L.LogWarning($"[ALB] rear-mat: {e.Message}"); }
     }
 
     public static void FixAlbedos()
@@ -889,6 +1093,32 @@ static class MeshReplacer
                 mr.sharedMaterials = trimmed;
             }
             catch { _fixers.RemoveAt(i); }
+        }
+    }
+
+    static void RegisterMeshGuard(MeshFilter mf, Mesh mesh, string tag)
+    {
+        for (int i = 0; i < _meshGuards.Count; i++)
+        {
+            try { if (_meshGuards[i].mf == mf) { _meshGuards[i] = (mf, mesh, tag); return; } }
+            catch { _meshGuards.RemoveAt(i--); }
+        }
+        _meshGuards.Add((mf, mesh, tag));
+    }
+
+    public static void FixMeshes()
+    {
+        for (int i = _meshGuards.Count - 1; i >= 0; i--)
+        {
+            try
+            {
+                var (mf, mesh, tag) = _meshGuards[i];
+                var cur = mf.sharedMesh;
+                if (cur == mesh) continue;
+                Plugin.L.LogInfo($"[MGUARD] '{tag}': '{cur?.name}' -> '{mesh.name}' (runtime mesh swap reverted, frame {Time.frameCount})");
+                mf.sharedMesh = mesh;
+            }
+            catch { _meshGuards.RemoveAt(i); }
         }
     }
 

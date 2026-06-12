@@ -49,6 +49,7 @@ static class LampDiag
             string plate = vehicle?.config?.licensePlate ?? "";
             if (bodyId == "body-caro-pickup" || bodyId == "body-caro") return true;
             if (plate == "body-caro-pickup" || plate == "body-caro") return true;
+            if (bodyId == "body-cricket-beetle" || plate == "body-cricket-beetle") return true;
         }
         catch { }
         return false;
@@ -109,6 +110,7 @@ static class LampDiag
             }
             catch { }
             sb.Append($" fp={frontPower:F3} rp={rearPower:F3}");
+            try { sb.Append(' ').Append(ReadPowersBuffer(vehicle)); } catch { }
 
             try
             {
@@ -339,10 +341,11 @@ static class LampDiag
             var root = vehicle.transform;
             if (root == null) return;
 
-            var model = MeshReplacer.FindInHierarchy(root, "CaroModel");
+            var model = MeshReplacer.FindInHierarchy(root, "CaroModel")
+                     ?? MeshReplacer.FindInHierarchy(root, "CricketBodyModel");
             if (model == null)
             {
-                Plugin.L.LogInfo($"{tag} [CM] CaroModel not found");
+                Plugin.L.LogInfo($"{tag} [CM] body model GO not found");
                 return;
             }
 
@@ -418,6 +421,37 @@ static class LampDiag
         catch { return "ERR"; }
     }
 
+    // Reads back the GPU _LampsPowers buffer (VLC.powersBuffer -> ComputeBuffer at +0x10)
+    // so we can see the actual per-lamp power values the shader receives.
+    public static unsafe string ReadPowersBuffer(Game.Vehicle vehicle)
+    {
+        try
+        {
+            var lc = vehicle.lamps;
+            if (lc == null) return "powers: lc=null";
+            IntPtr gpuBufPtr = Marshal.ReadIntPtr(lc.Pointer + 0x40);
+            if (gpuBufPtr == IntPtr.Zero) return "powers: buffer=null";
+            IntPtr cbPtr = Marshal.ReadIntPtr(gpuBufPtr + 0x10);
+            if (cbPtr == IntPtr.Zero) return "powers: cb=null";
+            int n = vehicle.body?.lamps?.Length ?? 0;
+            if (n <= 0) return "powers: lamps=0";
+            IntPtr klass   = IL2CPP.il2cpp_object_get_class(cbPtr);
+            IntPtr getData = IL2CPP.il2cpp_class_get_method_from_name(klass, "GetData", 1);
+            if (getData == IntPtr.Zero) return "powers: GetData not found";
+            var readback = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<float>(n);
+            IntPtr exc = IntPtr.Zero;
+            void** args = stackalloc void*[1];
+            args[0] = (void*)readback.Pointer;
+            IL2CPP.il2cpp_runtime_invoke(getData, cbPtr, args, ref exc);
+            if (exc != IntPtr.Zero) return "powers: GetData threw";
+            var sb = new StringBuilder("powers=[");
+            for (int i = 0; i < n; i++) { if (i > 0) sb.Append(","); sb.Append(readback[i].ToString("F2")); }
+            sb.Append("]");
+            return sb.ToString();
+        }
+        catch (Exception e) { return $"powers ERR: {e.Message}"; }
+    }
+
     static void DumpLampsController(Game.Vehicle vehicle, string tag)
     {
         try
@@ -436,6 +470,8 @@ static class LampDiag
                 }
             }
             catch (Exception e) { Plugin.L.LogInfo($"{tag} [LC] power ERR: {e.Message}"); }
+
+            try { Plugin.L.LogInfo($"{tag} [LC] {ReadPowersBuffer(vehicle)}"); } catch { }
 
             try
             {

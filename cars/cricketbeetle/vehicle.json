@@ -6,14 +6,14 @@
 
   "paintMaskTextureName": "BizonPaintMaskTexture",
   "albedoTextureName":    "BizonAlbedoTexture",
-  "disableAutoLights":    true,
 
   "meshReplacements": [
     {
       "bundle": "beetlebody",
       "candidates": ["beetlebody(6)", "beetlebody"],
       "target": "CricketBodyModel",
-      "isBody": true
+      "isBody": true,
+      "fixMaterialSlots": true
     },
     {
       "bundle": "beetleleftdoor",
