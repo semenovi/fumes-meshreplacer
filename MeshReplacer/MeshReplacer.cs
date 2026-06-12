@@ -7,30 +7,10 @@ using UnityEngine;
 
 static class MeshReplacer
 {
-    const bool ExperimentSkipPickupBodyMeshSwap = false;
-    const bool ExperimentHybridPickupBodyMesh = false;
-    const bool ExperimentForcePickupRearBulbRadius = false;
-    const float ForcedPickupRearBulbRadius = 0.80f;
-    const bool ExperimentPickupOverlayHybrid = false;
-    const bool ExperimentForcePickupRearClearCoatColor = false;
-    static readonly Color ForcedPickupRearClearCoatColor = new Color(0f, 1f, 0f, 1f);
-    const bool ExperimentOverridePickupRearBufferPositions = false;
-    static readonly Vector3 ExperimentPickupRearBufLamp6 = new Vector3(-1.90f, 1.55f, -3.75f);
-    static readonly Vector3 ExperimentPickupRearBufLamp7 = new Vector3( 1.90f, 2.15f, -4.55f);
-    const bool ExperimentForcePickupRearBulbDepth = false;
-    const float ForcedPickupRearBulbDepth = 10.05f;
-    const bool ExperimentForcePickupRearBulbRadiusRear = false;
-    const float ForcedPickupRearBulbRadiusRear = 1.90f;
-    const bool ExperimentOverridePickupBodyMeshBounds = false;
-    static readonly Vector3 ExperimentPickupBoundsCenter = new Vector3(0.0f, 0.45f, -1.65f);
-    static readonly Vector3 ExperimentPickupBoundsSize = new Vector3(1.9f, 1.7f, 1.2f);
-
     // Bundle path -> asset name -> Mesh (also "game|<name>" for Resources meshes)
     static readonly Dictionary<string, Mesh?>     _cache     = new();
-    static readonly Dictionary<string, Mesh?>     _hybridCache = new();
     // Material name -> Material (for materialSlots lookups)
     static readonly Dictionary<string, Material?> _matCache  = new();
-    static readonly Dictionary<Transform, ComputeBuffer>                                _globalLampBuffers = new();
     static readonly List<(MeshRenderer mr, int slots)>                              _fixers     = new();
     static readonly List<(MeshRenderer mr, string[] names)>                         _matSlots   = new();
     // mr + cached resolved Texture (null = not yet found); applied once via MPB
@@ -58,12 +38,6 @@ static class MeshReplacer
 
         foreach (var entry in def.MeshReplacements)
         {
-            if (ShouldSkipMeshReplacement(def, entry))
-            {
-                Plugin.L.LogInfo($"[EXP] Skip mesh replacement for '{def.Id}' target='{entry.Target}' isBody={entry.IsBody}");
-                continue;
-            }
-
             var mesh = GetMesh(entry, def.FolderPath);
             if (mesh == null) continue;
 
@@ -76,21 +50,12 @@ static class MeshReplacer
                 continue;
             }
 
-            if (TryApplyPickupOverlayHybrid(def, entry, targetGo, mesh))
-                continue;
-
             var mf = targetGo.GetComponent<MeshFilter>();
-            if (mf != null)
-                mesh = MaybeBuildHybridBodyMesh(def, entry, targetGo, mf.sharedMesh, mesh) ?? mesh;
-
             if (mf != null && mf.sharedMesh != mesh)
             {
                 Plugin.L.LogInfo($"[MESH] '{entry.Target}': '{mf.sharedMesh?.name}' -> '{mesh.name}'");
                 mf.sharedMesh = mesh;
             }
-            if (mf != null)
-                ApplyBodyMeshExperiments(def, entry, targetGo, mf.sharedMesh);
-
             if (entry.IsBody)
             {
                 var smr = targetGo.GetComponent<SkinnedMeshRenderer>();
@@ -160,7 +125,6 @@ static class MeshReplacer
             Plugin.L.LogInfo("[MESH] keepGameLampMesh: keeping InitLampsMeshes-generated body mesh");
 
         SyncLampMaterials(vehicleRoot, def);
-        ApplyLampShaderExperiments(vehicleRoot, def);
         LogVehicleState(vehicleRoot, def);
         VehiclePatcher.Apply(vehicleRoot, def);
 
@@ -172,236 +136,17 @@ static class MeshReplacer
             DumpBodyLampUVs(def, markerGo, "[UV2/REBAKED]");
         }
 
-        // lampPositionsBuffer (VehicleBody+0x180) is a private ComputeBuffer that is NOT copied by
-        // Instantiate. It was created in RuntimeInit→InitPrefab→InitLamps on the runtimePrefab, so
-        // it's null on every spawned instance.  Calling InitLamps() here recreates it from the
-        // current vb.lamps[] (already patched by VehiclePatcher) and presumably calls
-        // SetBuffer("_LampsPositions", ...) on the front/rear lamp materials — enabling mesh emission.
+        // lampPositionsBuffer (VehicleBody+0x180) is null on every spawned instance (not copied by
+        // Instantiate). InitLamps() recreates it from vb.lamps[] (already patched by VehiclePatcher).
+        // ForceWriteLampPositions then overwrites its contents from the managed side, because native
+        // InitLamps cannot read bulbPosition from il2cpp_object_new-allocated lamp objects.
         ReinitLampPositionsBuffer(vehicleRoot);
 
         if (def.VehicleBody?.Lamps != null)
         {
+            ForceWriteLampPositions(vehicleRoot);
             TrackLampVehicle(vehicleRoot);
             UploadLampPositionsBuffer(vehicleRoot, fullBind: true);
-        }
-    }
-
-    static bool ShouldSkipMeshReplacement(CustomVehicleDef def, MeshEntry entry)
-    {
-        if (!ExperimentSkipPickupBodyMeshSwap) return false;
-        if (def.Id != "body-caro-pickup") return false;
-        if (!entry.IsBody) return false;
-        return entry.Target == def.VehicleMarker;
-    }
-
-    static bool TryApplyPickupOverlayHybrid(CustomVehicleDef def, MeshEntry entry, GameObject targetGo, Mesh replacementMesh)
-    {
-        if (!ExperimentPickupOverlayHybrid) return false;
-        if (def.Id != "body-caro-pickup") return false;
-        if (!entry.IsBody) return false;
-        if (entry.Target != def.VehicleMarker) return false;
-
-        try
-        {
-            var baseMr = targetGo.GetComponent<MeshRenderer>();
-            var baseMf = targetGo.GetComponent<MeshFilter>();
-            if (baseMr == null || baseMf == null || baseMf.sharedMesh == null) return false;
-
-            var baseMats = baseMr.sharedMaterials;
-            if (baseMats == null || baseMats.Length < 5) return false;
-
-            var voidMat = baseMats[2];
-            if (voidMat == null) return false;
-
-            // Keep the original CaroModel as the lamp carrier and hide body/window geometry on it.
-            var carrierMats = new Material[baseMats.Length];
-            for (int i = 0; i < baseMats.Length; i++)
-                carrierMats[i] = i <= 2 ? voidMat : baseMats[i];
-            baseMr.sharedMaterials = carrierMats;
-
-            var parent = targetGo.transform.parent;
-            if (parent == null) return false;
-
-            const string overlayName = "MR_PickupBodyOverlay";
-            var overlayGo = FindDirectChild(parent, overlayName);
-            if (overlayGo == null)
-            {
-                overlayGo = new GameObject(overlayName);
-                overlayGo.transform.SetParent(parent, false);
-                Plugin.L.LogInfo($"[EXP] Created overlay GO '{overlayName}'");
-            }
-
-            overlayGo.transform.localPosition = targetGo.transform.localPosition;
-            overlayGo.transform.localRotation = targetGo.transform.localRotation;
-            overlayGo.transform.localScale = targetGo.transform.localScale;
-
-            var overlayMf = overlayGo.GetComponent<MeshFilter>() ?? overlayGo.AddComponent<MeshFilter>();
-            var overlayMr = overlayGo.GetComponent<MeshRenderer>() ?? overlayGo.AddComponent<MeshRenderer>();
-            overlayMf.sharedMesh = replacementMesh;
-
-            var overlayMats = new Material[baseMats.Length];
-            for (int i = 0; i < baseMats.Length; i++)
-            {
-                if (i == 3 || i == 4) overlayMats[i] = voidMat;
-                else overlayMats[i] = baseMats[i];
-            }
-            overlayMr.sharedMaterials = overlayMats;
-            overlayMr.enabled = true;
-            overlayGo.SetActive(true);
-
-            if (def.PaintMaskTextureName != null)
-                RegisterPaintMask(overlayMr, def.PaintMaskTextureName);
-            if (def.AlbedoTextureName != null)
-                RegisterAlbedo(overlayMr, def.AlbedoTextureName, isBody: true);
-
-            Plugin.L.LogInfo($"[EXP] Overlay hybrid active for '{def.Id}': original mesh keeps lamp slots, overlay mesh='{replacementMesh.name}' hides slots 3/4");
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Plugin.L.LogWarning($"[EXP] Overlay hybrid failed for '{def.Id}': {ex.Message}");
-            return false;
-        }
-    }
-
-    static GameObject? FindDirectChild(Transform parent, string name)
-    {
-        for (int i = 0; i < parent.childCount; i++)
-        {
-            var child = parent.GetChild(i);
-            if (child.gameObject.name == name) return child.gameObject;
-        }
-        return null;
-    }
-
-    static void ApplyLampShaderExperiments(Transform vehicleRoot, CustomVehicleDef def)
-    {
-        try
-        {
-            if (!ExperimentForcePickupRearBulbRadius &&
-                !ExperimentForcePickupRearBulbDepth &&
-                !ExperimentForcePickupRearBulbRadiusRear &&
-                !ExperimentForcePickupRearClearCoatColor) return;
-            if (def.Id != "body-caro-pickup") return;
-
-            var vb = vehicleRoot.GetComponentInChildren<Game.VehicleBody>(true);
-            var rmats = vb?.rearlampsMaterials;
-            if (rmats == null) return;
-
-            for (int i = 0; i < rmats.Count; i++)
-            {
-                var mat = rmats[i];
-                if (mat == null) continue;
-
-                if (ExperimentForcePickupRearBulbRadius && mat.HasProperty("_BulbRadius"))
-                {
-                    mat.SetFloat("_BulbRadius", ForcedPickupRearBulbRadius);
-                    Plugin.L.LogInfo($"[EXP] rear lamp material[{i}] _BulbRadius -> {ForcedPickupRearBulbRadius:F3}");
-                }
-
-                if (ExperimentForcePickupRearBulbDepth && mat.HasProperty("_BulbDepth"))
-                {
-                    mat.SetFloat("_BulbDepth", ForcedPickupRearBulbDepth);
-                    Plugin.L.LogInfo($"[EXP] rear lamp material[{i}] _BulbDepth -> {ForcedPickupRearBulbDepth:F3}");
-                }
-
-                if (ExperimentForcePickupRearBulbRadiusRear && mat.HasProperty("_BulbRadiusRear"))
-                {
-                    mat.SetFloat("_BulbRadiusRear", ForcedPickupRearBulbRadiusRear);
-                    Plugin.L.LogInfo($"[EXP] rear lamp material[{i}] _BulbRadiusRear -> {ForcedPickupRearBulbRadiusRear:F3}");
-                }
-
-                if (ExperimentForcePickupRearClearCoatColor && mat.HasProperty("_ClearCoatColor"))
-                {
-                    mat.SetColor("_ClearCoatColor", ForcedPickupRearClearCoatColor);
-                    Plugin.L.LogInfo($"[EXP] rear lamp material[{i}] _ClearCoatColor -> {ForcedPickupRearClearCoatColor}");
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Plugin.L.LogWarning($"[EXP] ApplyLampShaderExperiments: {ex.Message}");
-        }
-    }
-
-    static void ApplyBodyMeshExperiments(CustomVehicleDef def, MeshEntry entry, GameObject targetGo, Mesh? mesh)
-    {
-        try
-        {
-            if (!ExperimentOverridePickupBodyMeshBounds) return;
-            if (def.Id != "body-caro-pickup") return;
-            if (!entry.IsBody) return;
-            if (entry.Target != def.VehicleMarker) return;
-            if (mesh == null) return;
-
-            var b = mesh.bounds;
-            b.center = ExperimentPickupBoundsCenter;
-            b.size = ExperimentPickupBoundsSize;
-            mesh.bounds = b;
-            Plugin.L.LogInfo($"[EXP] body mesh bounds -> center=({b.center.x:F3},{b.center.y:F3},{b.center.z:F3}) size=({b.size.x:F3},{b.size.y:F3},{b.size.z:F3}) on '{targetGo.name}' mesh='{mesh.name}'");
-        }
-        catch (Exception ex)
-        {
-            Plugin.L.LogWarning($"[EXP] ApplyBodyMeshExperiments: {ex.Message}");
-        }
-    }
-
-    static Vector3 GetLampBufferPositionOverride(CustomVehicleDef? def, int lampIndex, bool isFront, Vector3 fallback)
-    {
-        if (!ExperimentOverridePickupRearBufferPositions) return fallback;
-        if (def == null || def.Id != "body-caro-pickup") return fallback;
-        if (isFront) return fallback;
-
-        if (lampIndex == 6) return ExperimentPickupRearBufLamp6;
-        if (lampIndex == 7) return ExperimentPickupRearBufLamp7;
-        return fallback;
-    }
-
-    static Mesh? MaybeBuildHybridBodyMesh(CustomVehicleDef def, MeshEntry entry, GameObject targetGo, Mesh? originalMesh, Mesh replacementMesh)
-    {
-        if (!ExperimentHybridPickupBodyMesh) return null;
-        if (def.Id != "body-caro-pickup") return null;
-        if (!entry.IsBody) return null;
-        if (entry.Target != def.VehicleMarker) return null;
-        if (originalMesh == null) return null;
-        if (replacementMesh == null) return null;
-        if (originalMesh.subMeshCount < 5 || replacementMesh.subMeshCount < 5) return null;
-
-        string key = $"hybrid|{def.Id}|{entry.Target}";
-        if (_hybridCache.TryGetValue(key, out var cached) && cached != null) return cached;
-
-        if (originalMesh.name != null && originalMesh.name.Contains("_HybridLampCarrier"))
-            return null;
-
-        try
-        {
-            var combined = new CombineInstance[5];
-            for (int i = 0; i < 5; i++)
-            {
-                bool keepOriginalLampSubmesh = i == 3 || i == 4;
-                combined[i] = new CombineInstance
-                {
-                    mesh = keepOriginalLampSubmesh ? originalMesh : replacementMesh,
-                    subMeshIndex = i,
-                    transform = Matrix4x4.identity
-                };
-            }
-
-            var hybrid = new Mesh();
-            hybrid.name = $"{replacementMesh.name}_HybridLampCarrier";
-            hybrid.indexFormat = replacementMesh.indexFormat;
-            hybrid.CombineMeshes(combined, mergeSubMeshes: false, useMatrices: true, hasLightmapData: false);
-            hybrid.RecalculateBounds();
-            _hybridCache[key] = hybrid;
-
-            Plugin.L.LogInfo($"[EXP] Built hybrid mesh for '{def.Id}' on '{targetGo.name}': body subs 0-2 from '{replacementMesh.name}', lamp subs 3-4 from '{originalMesh.name}'");
-            return hybrid;
-        }
-        catch (Exception ex)
-        {
-            Plugin.L.LogWarning($"[EXP] Hybrid mesh build failed for '{def.Id}': {ex.Message}");
-            _hybridCache[key] = null;
-            return null;
         }
     }
 
@@ -505,9 +250,69 @@ static class MeshReplacer
             if (exc != IntPtr.Zero) { Plugin.L.LogWarning("[LPOS] InitLamps threw exception"); return; }
 
             IntPtr cbPtr = Marshal.ReadIntPtr(vb.Pointer + 0x180);
-            Plugin.L.LogInfo($"[LPOS] InitLamps done: lampPositionsBuffer={(cbPtr == IntPtr.Zero ? "null" : $"0x{cbPtr:X}")}");
+            int nativeCbCount = -1;
+            if (cbPtr != IntPtr.Zero)
+            {
+                try
+                {
+                    IntPtr cbKlass = IL2CPP.il2cpp_object_get_class(cbPtr);
+                    IntPtr countProp = IL2CPP.il2cpp_class_get_method_from_name(cbKlass, "get_count", 0);
+                    if (countProp != IntPtr.Zero)
+                    {
+                        unsafe
+                        {
+                            IntPtr exc2 = IntPtr.Zero;
+                            IntPtr r = IL2CPP.il2cpp_runtime_invoke(countProp, cbPtr, null, ref exc2);
+                            if (exc2 == IntPtr.Zero && r != IntPtr.Zero)
+                                nativeCbCount = Marshal.ReadInt32(r + 0x10);
+                        }
+                    }
+                }
+                catch { }
+            }
+            int lampCount = vb.lamps?.Length ?? -1;
+            Plugin.L.LogInfo($"[LPOS] InitLamps done: buf={(cbPtr == IntPtr.Zero ? "null" : $"0x{cbPtr:X}")} cb.count={nativeCbCount} vb.lamps.Length={lampCount}");
         }
         catch (Exception ex) { Plugin.L.LogWarning($"[LPOS] ReinitLampPositionsBuffer: {ex.Message}"); }
+    }
+
+    // Write bulbPosition.position (local coords) from managed vb.lamps directly into the
+    // native lampPositionsBuffer (VB+0x180) via SetData. Needed because il2cpp_object_new-
+    // allocated lamp objects have positions that native InitLamps can't read correctly.
+    static unsafe void ForceWriteLampPositions(Transform vehicleRoot)
+    {
+        try
+        {
+            var vb = vehicleRoot.GetComponentInChildren<Game.VehicleBody>(true);
+            if (vb == null) return;
+
+            IntPtr cbPtr = Marshal.ReadIntPtr(vb.Pointer + 0x180);
+            if (cbPtr == IntPtr.Zero) { Plugin.L.LogWarning("[LPOS/FW] lampPositionsBuffer null"); return; }
+
+            var lamps = vb.lamps;
+            int n = lamps?.Length ?? 0;
+            if (n == 0) return;
+
+            var positions = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<Vector3>(n);
+            for (int i = 0; i < n; i++)
+                positions[i] = lamps?[i]?.bulbPosition.position ?? Vector3.zero;
+
+            IntPtr klass  = IL2CPP.il2cpp_object_get_class(cbPtr);
+            IntPtr method = IL2CPP.il2cpp_class_get_method_from_name(klass, "SetData", 1);
+            if (method == IntPtr.Zero) { Plugin.L.LogWarning("[LPOS/FW] SetData not found"); return; }
+
+            IntPtr exc = IntPtr.Zero;
+            void** args = stackalloc void*[1];
+            args[0] = (void*)positions.Pointer;
+            IL2CPP.il2cpp_runtime_invoke(method, cbPtr, args, ref exc);
+            if (exc != IntPtr.Zero) { Plugin.L.LogWarning("[LPOS/FW] SetData threw"); return; }
+
+            var sb = new System.Text.StringBuilder($"[LPOS/FW] Wrote {n} positions:");
+            for (int i = 0; i < n; i++)
+                sb.Append($" [{i}]=({positions[i].x:F2},{positions[i].y:F2},{positions[i].z:F2})");
+            Plugin.L.LogInfo(sb.ToString());
+        }
+        catch (Exception ex) { Plugin.L.LogWarning($"[LPOS/FW] {ex.Message}"); }
     }
 
     // Dumps the lamp index channel (UV2 = TEXCOORD1) of the body mesh currently on the
@@ -617,9 +422,6 @@ static class MeshReplacer
     }
 
     // Restore the working local-coords pattern: bind per-material + global to VB+0x180.
-    // InitLamps (called in ReinitLampPositionsBuffer before this) fills VB+0x180 with
-    // the correct local-space positions.  We also call GetData once (fullBind only) to
-    // log exactly what the buffer contains so we can verify positions are correct.
     static unsafe void UploadLampPositionsBuffer(Transform vehicleRoot, bool fullBind)
     {
         try
@@ -636,39 +438,6 @@ static class MeshReplacer
 
             var lamps = vb.lamps;
             int n = lamps?.Count ?? 0;
-
-            if (fullBind)
-            {
-                // Read back buffer contents via GetData to verify InitLamps filled it correctly.
-                try
-                {
-                    IntPtr klass   = IL2CPP.il2cpp_object_get_class(cbObjPtr);
-                    IntPtr getData = IL2CPP.il2cpp_class_get_method_from_name(klass, "GetData", 1);
-                    if (getData != IntPtr.Zero)
-                    {
-                        // GetData into a float array (n*3 floats = n Vector3s with stride 12)
-                        var readback = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<float>(n * 3);
-                        IntPtr exc2 = IntPtr.Zero;
-                        void** args2 = stackalloc void*[1];
-                        args2[0] = (void*)readback.Pointer;
-                        IL2CPP.il2cpp_runtime_invoke(getData, cbObjPtr, args2, ref exc2);
-                        if (exc2 == IntPtr.Zero)
-                        {
-                            for (int i = 0; i < n; i++)
-                            {
-                                float x = readback[i * 3];
-                                float y = readback[i * 3 + 1];
-                                float z = readback[i * 3 + 2];
-                                bool isFront = lamps?[i]?.isFront ?? true;
-                                if (!isFront || i < 2)
-                                    Plugin.L.LogInfo($"[LPOS/RB] buf[{i}] isFront={isFront} pos=({x:F3},{y:F3},{z:F3})");
-                            }
-                        }
-                        else Plugin.L.LogWarning("[LPOS/RB] GetData threw");
-                    }
-                }
-                catch (Exception ex) { Plugin.L.LogWarning($"[LPOS/RB] {ex.Message}"); }
-            }
 
             var cb = new ComputeBuffer(cbObjPtr);
 
@@ -695,67 +464,6 @@ static class MeshReplacer
         }
     }
 
-    static void UpdateGlobalLampPositions(Transform vehicleRoot, CustomVehicleDef? def, Game.VehicleLamp[] lamps, int n)
-    {
-        try
-        {
-            if (!_globalLampBuffers.TryGetValue(vehicleRoot, out var cb) || cb == null || cb.count != n || cb.stride != 12)
-            {
-                try { cb?.Release(); } catch { }
-                cb = new ComputeBuffer(n, 12);
-                _globalLampBuffers[vehicleRoot] = cb;
-                Plugin.L.LogInfo($"[LPOS] Created global world-space lamp buffer count={n}");
-            }
-
-            var world = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<UnityEngine.Vector3>(n);
-            for (int i = 0; i < n; i++)
-            {
-                var lamp = lamps[i];
-                if (lamp == null) continue;
-                var local = GetLampBufferPositionOverride(def, i, lamp.isFront, lamp.bulbPosition.position);
-                world[i] = vehicleRoot.TransformPoint(local);
-                try
-                {
-                    if (!lamp.isFront)
-                        Plugin.L.LogInfo($"[LPOS/G] rear lamp[{i}] world=({world[i].x:F3},{world[i].y:F3},{world[i].z:F3})");
-                }
-                catch { }
-            }
-
-            IntPtr klass  = IL2CPP.il2cpp_object_get_class(cb.Pointer);
-            IntPtr method = IL2CPP.il2cpp_class_get_method_from_name(klass, "SetData", 1);
-            if (method == IntPtr.Zero)
-            {
-                Plugin.L.LogWarning("[LPOS] Global ComputeBuffer.SetData(1) not found");
-                return;
-            }
-
-            unsafe
-            {
-                IntPtr exc = IntPtr.Zero;
-                void** args = stackalloc void*[1];
-                args[0] = (void*)world.Pointer;
-                IL2CPP.il2cpp_runtime_invoke(method, cb.Pointer, args, ref exc);
-                if (exc != IntPtr.Zero)
-                {
-                    Plugin.L.LogWarning("[LPOS] Global ComputeBuffer.SetData threw exception");
-                    return;
-                }
-            }
-
-            Shader.SetGlobalBuffer(Shader.PropertyToID("_LampsPositions"), cb);
-        }
-        catch (Exception ex)
-        {
-            Plugin.L.LogWarning($"[LPOS] UpdateGlobalLampPositions: {ex.Message}");
-        }
-    }
-
-    // Reads vlc.powersBuffer (GPUBuffer<float>) and calls material.SetBuffer("_LampsPowers", cb)
-    // on every material currently in vb.frontLampsMaterials and vb.rearlampsMaterials.
-    // Safe to call multiple times — SetBuffer is idempotent.
-    // Call from VehicleBody.InitMaterials postfix (covers skin re-init) and from
-    // VLC.InitPowerBuffer postfix (covers initial registration).
     public static unsafe void RebindLampPowersBuffer(Game.Vehicle vehicle)
     {
         try

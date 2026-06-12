@@ -102,7 +102,11 @@
       {"front": true,  "bulb": [ 0.502, 0.400, 1.657]},
       {"front": true,  "bulb": [ 0,     0.38,  1.9]},
       {"front": false, "bulb": [-0.550, 0.387, -1.589]},
-      {"front": false, "bulb": [ 0.550, 0.387, -1.589]}
+      {"front": false, "bulb": [ 0.550, 0.387, -1.589]},
+      {"front": true,  "bulb": [-0.305, 1.264, 0.532]},
+      {"front": true,  "bulb": [-0.101, 1.264, 0.547]},
+      {"front": true,  "bulb": [ 0.102, 1.264, 0.547]},
+      {"front": true,  "bulb": [ 0.304, 1.266, 0.532]}
     ],
     "licensePlatePosition": [0, 0.18, -1.85],
     "licensePlateRotation": [0, 180, 0]

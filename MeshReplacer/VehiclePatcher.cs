@@ -1,4 +1,6 @@
 using System;
+using System.Runtime.InteropServices;
+using Il2CppInterop.Runtime;
 using Nothke.Utils;
 using UnityEngine;
 
@@ -35,26 +37,66 @@ static class VehiclePatcher
             {
                 var lamps = vb.lamps;
                 if (lamps == null) return;
-                int n = Math.Min(lamps.Length, cfg.Lamps.Length);
+
+                int existingCount = lamps.Length;
+                int targetCount   = cfg.Lamps.Length;
+
+                Game.VehicleLamp[] workLamps;
+                if (targetCount > existingCount)
+                {
+                    // Extend the lamps array with new il2cpp-allocated VehicleLamp instances
+                    workLamps = new Game.VehicleLamp[targetCount];
+                    for (int i = 0; i < existingCount; i++) workLamps[i] = lamps[i];
+
+                    IntPtr lampClass = IL2CPP.il2cpp_object_get_class(lamps[0].Pointer);
+                    for (int i = existingCount; i < targetCount; i++)
+                    {
+                        IntPtr ptr = IL2CPP.il2cpp_object_new(lampClass);
+                        if (ptr == IntPtr.Zero)
+                        {
+                            Plugin.L.LogWarning($"[MB]   lamps[{i}] il2cpp_object_new failed");
+                            workLamps[i] = lamps[0];
+                            continue;
+                        }
+                        // Write isFront (bool, offset 0x10) and bulbPosition.position
+                        // (Vector3, offset 0x20) directly — property setters don't work
+                        // on il2cpp_object_new-allocated objects before GC registration.
+                        Marshal.WriteByte(IntPtr.Add(ptr, 0x10),
+                            cfg.Lamps[i].Front ? (byte)1 : (byte)0);
+                        float[] b = cfg.Lamps[i].Bulb;
+                        Marshal.Copy(new float[] { b[0], b[1], b[2] },
+                            0, IntPtr.Add(ptr, 0x20), 3);
+                        workLamps[i] = new Game.VehicleLamp(ptr);
+                        Plugin.L.LogInfo($"[MB]   Created VehicleLamp[{i}] ptr=0x{ptr:X} isFront={cfg.Lamps[i].Front} bulb=({b[0]},{b[1]},{b[2]})");
+                    }
+                }
+                else
+                {
+                    workLamps = new Game.VehicleLamp[existingCount];
+                    for (int i = 0; i < existingCount; i++) workLamps[i] = lamps[i];
+                }
+
+                // Patch existing lamps via property setters (known to work)
+                int n = Math.Min(Math.Min(workLamps.Length, cfg.Lamps.Length), existingCount);
                 for (int i = 0; i < n; i++)
                 {
-                    var l          = lamps[i];
+                    var l = workLamps[i];
+                    if (l == null) continue;
                     l.isFront      = cfg.Lamps[i].Front;
                     l.bulbPosition = PP(cfg.Lamps[i].Bulb);
-                    lamps[i]       = l;
+                    workLamps[i]   = l;
                 }
-                vb.lamps = lamps;
+                vb.lamps = workLamps;
+
                 // Readback: verify bulbPosition was written
                 var rb = vb.lamps;
                 if (rb != null)
-                {
                     for (int i = 0; i < Math.Min(rb.Length, cfg.Lamps.Length); i++)
                     {
-                        var p = rb[i].bulbPosition.position;
+                        var p = rb[i]?.bulbPosition.position ?? Vector3.zero;
                         var e = cfg.Lamps[i].Bulb;
                         Plugin.L.LogInfo($"[MB]   lamps[{i}] bulb readback=({p.x:F3},{p.y:F3},{p.z:F3}) expected=({e[0]},{e[1]},{e[2]})");
                     }
-                }
             }, "lamps");
 
         if (cfg.FrontLampsLightPosition != null)
