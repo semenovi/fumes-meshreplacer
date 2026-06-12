@@ -57,13 +57,15 @@
       "bundle": "panelfl",
       "candidates": ["panelfl"],
       "target": "CricketPanelFL",
-      "materialSlots": ["", "CricketLampFrontMaterial"]
+      "materialSlots": ["", "CricketLampFrontMaterial"],
+      "syncFrontLampSlot": true
     },
     {
       "bundle": "panelfr",
       "candidates": ["panelfr"],
       "target": "CricketPanelFR",
-      "materialSlots": ["", "CricketLampFrontMaterial"]
+      "materialSlots": ["", "CricketLampFrontMaterial"],
+      "syncFrontLampSlot": true
     },
     {
       "gameMesh": "CaroEngine",
@@ -96,8 +98,8 @@
     "lamps": [
       {"front": true,  "bulb": [ 0.555, 0.294, -1.611]},
       {"front": true,  "bulb": [-0.555, 0.294, -1.611]},
-      {"front": true,  "bulb": [-0.22,  0.38,  1.9]},
-      {"front": true,  "bulb": [ 0.22,  0.38,  1.9]},
+      {"front": true,  "bulb": [-0.502, 0.400, 1.657]},
+      {"front": true,  "bulb": [ 0.502, 0.400, 1.657]},
       {"front": true,  "bulb": [ 0,     0.38,  1.9]},
       {"front": false, "bulb": [-0.550, 0.387, -1.589]},
       {"front": false, "bulb": [ 0.550, 0.387, -1.589]}
@@ -134,3 +136,4 @@
     {"index": 2, "position": [0.0, 0.35,   1.871]}
   ]
 }
+
