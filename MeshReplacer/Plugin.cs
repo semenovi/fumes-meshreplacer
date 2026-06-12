@@ -56,6 +56,175 @@ static class MaterialCycler
     }
 }
 
+// F6: cycle engine configurations for the current custom vehicle (if AvailableEngines is set).
+// Swaps vehicle.config.engine and writes maxTorque / idleShaftSpeed into CarSimulation.engine
+// via raw IL2CPP pointer writes (CarSimulation.engine at +0x30, CarEngine.idleShaftSpeed at +0x30,
+// CarEngine.maxTorque at +0x34).
+static class EngineSwapper
+{
+    // def.Id → current engine index in def.AvailableEngines
+    static readonly Dictionary<string, int> _indices = new();
+    static int _lastFrame = -1;
+
+    public static void TryCycle(Game.Vehicle vehicle)
+    {
+        int frame = Time.frameCount;
+        if (frame == _lastFrame) return;
+        _lastFrame = frame;
+
+        try
+        {
+            if (!vehicle.IsLocalPlayer) return;
+            var def = VehicleFactory.GetDefForVehicle(vehicle);
+            if (def == null) return;
+
+            if (def.AvailableEngines == null || def.AvailableEngines.Length == 0)
+            {
+                // Dump all available engine IDs so the user can populate availableEngines in vehicle.json
+                Plugin.L.LogInfo($"[ENG] No availableEngines in '{def.Id}'. Available engines in ItemDatabase:");
+                try
+                {
+                    var engines = Game.ItemDatabase.Engines;
+                    for (int i = 0; i < engines.Count; i++)
+                        try { Plugin.L.LogInfo($"[ENG]   [{i}] id='{engines[i]?.id}' label='{engines[i]?.label}'"); } catch { }
+                }
+                catch (Exception e2) { Plugin.L.LogWarning($"[ENG] dump engines: {e2.Message}"); }
+                return;
+            }
+
+            if (!_indices.TryGetValue(def.Id, out int idx)) idx = 0;
+            idx = (idx + 1) % def.AvailableEngines.Length;
+            _indices[def.Id] = idx;
+
+            Apply(vehicle, def.AvailableEngines[idx]);
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"[ENG] TryCycle: {e.Message}"); }
+    }
+
+    static void Apply(Game.Vehicle vehicle, EngineSwapDef eng)
+    {
+        Game.EngineType? engineType = null;
+
+        // ── 1. Swap config.engine to the target EngineItem ──────────────────
+        try
+        {
+            var engines = Game.ItemDatabase.Engines;
+            for (int i = 0; i < engines.Count; i++)
+                try { if (engines[i]?.id == eng.Id) { engineType = engines[i]; break; } } catch { }
+
+            if (engineType != null)
+            {
+                var item = engineType.CreateItem()?.TryCast<Game.EngineItem>();
+                if (item != null)
+                {
+                    vehicle.config.engine = item;
+                    Plugin.L.LogInfo($"[ENG] config.engine → '{engineType.id}' (label='{engineType.label}')");
+                }
+                else
+                    Plugin.L.LogWarning($"[ENG] CreateItem cast failed for '{eng.Id}'");
+            }
+            else
+                Plugin.L.LogWarning($"[ENG] EngineType '{eng.Id}' not found in ItemDatabase.Engines");
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"[ENG] config swap: {e.Message}"); }
+
+        // ── 2. Reinit VehicleStats so the game recomputes Torque from the new engine ──
+        // VehicleStats.ctor(VehicleConfig) at Offset 0x185D140 sets Torque (at +0x24)
+        // from the engine item stats. CarEngine.maxTorque is initialised from stats.Torque,
+        // so calling the ctor again propagates the new engine to the physics side.
+        // Vehicle.stats at +0x50; CarSimulation at +0x58; CarSimulation.engine at +0x30;
+        // CarEngine.maxTorque at +0x34; CarEngine.idleShaftSpeed at +0x30.
+        try
+        {
+            IntPtr statsPtr = Marshal.ReadIntPtr(vehicle.Pointer + 0x50);
+            if (statsPtr != IntPtr.Zero)
+            {
+                IntPtr statsKlass = IL2CPP.il2cpp_object_get_class(statsPtr);
+                IntPtr ctorMethod = IL2CPP.il2cpp_class_get_method_from_name(statsKlass, ".ctor", 1);
+                if (ctorMethod != IntPtr.Zero)
+                {
+                    unsafe
+                    {
+                        IntPtr configPtr = vehicle.config.Pointer;
+                        IntPtr* args     = stackalloc IntPtr[1];
+                        args[0]          = configPtr;
+                        IntPtr exc       = IntPtr.Zero;
+                        IL2CPP.il2cpp_runtime_invoke(ctorMethod, statsPtr, (void**)args, ref exc);
+                        if (exc != IntPtr.Zero)
+                            Plugin.L.LogWarning("[ENG] VehicleStats.ctor exception");
+                    }
+                    float newTorque = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(IntPtr.Add(statsPtr, 0x24)));
+                    Plugin.L.LogInfo($"[ENG] VehicleStats.Torque → {newTorque:F3}");
+
+                    // Push the recomputed torque into the live CarEngine.
+                    IntPtr simPtr = Marshal.ReadIntPtr(vehicle.Pointer + 0x58);
+                    if (simPtr != IntPtr.Zero)
+                    {
+                        IntPtr engPtr = Marshal.ReadIntPtr(simPtr + 0x30);
+                        if (engPtr != IntPtr.Zero)
+                        {
+                            Marshal.WriteInt32(IntPtr.Add(engPtr, 0x34), BitConverter.SingleToInt32Bits(newTorque));
+                            Plugin.L.LogInfo($"[ENG] CarEngine.maxTorque ← {newTorque:F3}");
+
+                            // Also apply optional config overrides.
+                            if (eng.IdleRPM.HasValue)
+                            {
+                                float v = eng.IdleRPM.Value * 0.10472f;
+                                Marshal.WriteInt32(IntPtr.Add(engPtr, 0x30), BitConverter.SingleToInt32Bits(v));
+                                Plugin.L.LogInfo($"[ENG] idleShaftSpeed ← {v:F3}");
+                            }
+                            if (eng.MaxTorque.HasValue)
+                            {
+                                Marshal.WriteInt32(IntPtr.Add(engPtr, 0x34), BitConverter.SingleToInt32Bits(eng.MaxTorque.Value));
+                                Plugin.L.LogInfo($"[ENG] maxTorque override ← {eng.MaxTorque.Value:F3}");
+                            }
+                            if (eng.MaxRPM.HasValue)
+                            {
+                                IntPtr revLimiterPtr = Marshal.ReadIntPtr(IntPtr.Add(engPtr, 0x28));
+                                if (revLimiterPtr != IntPtr.Zero)
+                                {
+                                    float v = eng.MaxRPM.Value * 0.10472f;
+                                    Marshal.WriteInt32(IntPtr.Add(revLimiterPtr, 0x18), BitConverter.SingleToInt32Bits(v));
+                                    Plugin.L.LogInfo($"[ENG] revLimiter.maxShaftSpeed ← {v:F3} ({eng.MaxRPM.Value:F0} RPM)");
+                                }
+                                else Plugin.L.LogWarning("[ENG] revLimiter ptr is null, MaxRPM not applied");
+                            }
+                        }
+                    }
+                }
+                else Plugin.L.LogWarning("[ENG] VehicleStats.ctor(1) not found");
+            }
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"[ENG] physics reinit: {e.Message}"); }
+
+        // ── 3. Update live EngineSoundSynthesizer preset ─────────────────────
+        // The synthesizer lives on a separate GO (PlayerVehicleEngineSFX/AudioSource),
+        // not under the vehicle root — use scene-wide search, cache the result.
+        if (engineType != null)
+        {
+            try
+            {
+                IntPtr presetPtr = Marshal.ReadIntPtr(engineType.Pointer + 0x60);
+                if (presetPtr != IntPtr.Zero)
+                {
+                    var preset = new PirxOSSynthesis.EngineSoundPreset(presetPtr);
+                    var synths = UnityEngine.Object.FindObjectsOfType<PirxOSSynthesis.EngineSoundSynthesizer>();
+                    if (synths != null && synths.Length > 0)
+                    {
+                        synths[0].SetEnginePreset(preset);
+                        Plugin.L.LogInfo($"[ENG] SetEnginePreset → '{preset.name}'");
+                    }
+                    else Plugin.L.LogWarning("[ENG] no EngineSoundSynthesizer in scene");
+                }
+                else Plugin.L.LogWarning("[ENG] engineType.preset ptr is null");
+            }
+            catch (Exception e) { Plugin.L.LogWarning($"[ENG] sound: {e.Message}"); }
+        }
+
+        Plugin.L.LogInfo($"[ENG] Active engine: id='{eng.Id}' maxTorque={eng.MaxTorque?.ToString("F1") ?? "(unchanged)"} idleRPM={eng.IdleRPM?.ToString("F0") ?? "(unchanged)"} maxRPM={eng.MaxRPM?.ToString("F0") ?? "(unchanged)"}");
+    }
+}
+
 // Inject cloned BodyTypes after ItemDatabase loads so they appear in Body list.
 [HarmonyPatch(typeof(Game.ItemDatabase), "RuntimeLoad")]
 static class ItemDatabasePatch
@@ -208,6 +377,7 @@ static class VehicleUpdatePatch
 {
     static int _lastRunFrame  = -1;
     static int _lastF3Frame   = -1;
+    static int _lastF6Frame   = -1;
     static int _lastScanFrame = -1;
     static int _lastLampDump  = -9999;
 
@@ -217,6 +387,12 @@ static class VehicleUpdatePatch
         {
             int f = Time.frameCount;
             if (f != _lastF3Frame) { _lastF3Frame = f; MaterialCycler.Cycle(); }
+        }
+
+        if (Input.GetKeyDown(KeyCode.F6))
+        {
+            int f = Time.frameCount;
+            if (f != _lastF6Frame) { _lastF6Frame = f; EngineSwapper.TryCycle(__instance); }
         }
 
         int frame = Time.frameCount;

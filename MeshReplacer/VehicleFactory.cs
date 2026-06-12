@@ -176,6 +176,7 @@ static class VehicleFactory
             InjectItems(save);
             InjectConfigs(save);
             InjectSuspensionItems(save);
+            InjectEngineItems(save);
         }
         catch (Exception e) { Plugin.L.LogError($"[VF] InjectSaveConfigs: {e.Message}"); }
     }
@@ -217,6 +218,39 @@ static class VehicleFactory
             Plugin.L.LogInfo($"[VF] [DEBUG] Granted suspension '{e.id}'");
     }
     // ─────────────────────────────────────────────────────────────────────────
+
+    // Grants one item of each configured engine to the player on every game load (debug mode only).
+    static void InjectEngineItems(Save.PlayerSaveData save)
+    {
+        if (!GrantDebugSuspensions) return;
+
+        var items = save.items;
+        if (items == null) return;
+
+        var existing = new HashSet<string>();
+        for (int i = 0; i < items.Length; i++)
+            try { var id = items[i]?.id; if (id != null) existing.Add(id); } catch { }
+
+        var toAdd = new List<Save.ItemSaveData>();
+        foreach (var def in _defs.Values)
+        {
+            if (def.AvailableEngines == null) continue;
+            foreach (var eng in def.AvailableEngines)
+                if (!string.IsNullOrEmpty(eng.Id) && existing.Add(eng.Id))
+                    toAdd.Add(new Save.ItemSaveData { id = eng.Id });
+        }
+
+        if (toAdd.Count == 0) return;
+
+        int oldLen = items.Length;
+        var newArr = new Il2CppReferenceArray<Save.ItemSaveData>(oldLen + toAdd.Count);
+        for (int i = 0; i < oldLen; i++) newArr[i] = items[i];
+        for (int i = 0; i < toAdd.Count; i++) newArr[oldLen + i] = toAdd[i];
+        save.items = newArr;
+
+        foreach (var e in toAdd)
+            Plugin.L.LogInfo($"[VF] [DEBUG] Granted engine '{e.id}'");
+    }
 
     // Adds an ItemSaveData entry to save.items so the Body list shows the custom body.
     static void InjectItems(Save.PlayerSaveData save)

@@ -134,6 +134,20 @@
     "suspension-griffin-truck"
   ],
 
+  "availableEngines": [
+    {"id": "engine-inline-3"},
+    {"id": "engine-inline-4"},
+    {"id": "engine-inline-5"},
+    {"id": "engine-boxer-4"},
+    {"id": "engine-crossplane-4"},
+    {"id": "engine-diesel-3"},
+    {"id": "engine-diesel-4"},
+    {"id": "engine-diesel-60"},
+    {"id": "engine-v6"},
+    {"id": "engine-v8-classic"},
+    {"id": "engine-v8"}
+  ],
+
   "hardpoints": [
     {"index": 0, "position": [0.0, 1.30,  -0.414]},
     {"index": 1, "position": [0.0, 0.8,  1.19]},

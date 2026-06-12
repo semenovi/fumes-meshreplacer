@@ -26,6 +26,17 @@ public class MeshEntry
     public bool      SyncFrontLampSlot { get; set; }
 }
 
+public class EngineSwapDef
+{
+    public string  Id        { get; set; } = "";
+    // Overrides physics: maxTorque written to CarEngine.maxTorque (+0x34)
+    public float?  MaxTorque { get; set; }
+    // Overrides physics: converted to rad/s, written to CarEngine.idleShaftSpeed (+0x30)
+    public float?  IdleRPM   { get; set; }
+    // Overrides physics: converted to rad/s, written to CarEngine.revLimiter.maxShaftSpeed (+0x28→+0x18)
+    public float?  MaxRPM    { get; set; }
+}
+
 public class LampConfig
 {
     public bool    Front { get; set; }
@@ -98,6 +109,10 @@ public class CustomVehicleDef
     // Suspension type IDs (from ItemDatabase) that should be available in the garage for this body.
     // Each listed suspension is cloned and bound to this custom body type so the garage shows them.
     public string[]? AvailableSuspensions { get; set; }
+
+    // Engine configurations to cycle through with F6.
+    // Each entry specifies an engine ID (from ItemDatabase) and optional physics overrides.
+    public EngineSwapDef[]? AvailableEngines { get; set; }
 
     [System.Text.Json.Serialization.JsonIgnore]
     public string FolderPath { get; set; } = "";
