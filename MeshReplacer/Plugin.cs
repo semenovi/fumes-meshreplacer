@@ -132,11 +132,11 @@ static class EngineSwapper
         // VehicleStats.ctor(VehicleConfig) at Offset 0x185D140 sets Torque (at +0x24)
         // from the engine item stats. CarEngine.maxTorque is initialised from stats.Torque,
         // so calling the ctor again propagates the new engine to the physics side.
-        // Vehicle.stats at +0x50; CarSimulation at +0x58; CarSimulation.engine at +0x30;
+        // Vehicle.stats at +0x60; CarSimulation at +0x68; CarSimulation.engine at +0x30;
         // CarEngine.maxTorque at +0x34; CarEngine.idleShaftSpeed at +0x30.
         try
         {
-            IntPtr statsPtr = Marshal.ReadIntPtr(vehicle.Pointer + 0x50);
+            IntPtr statsPtr = Marshal.ReadIntPtr(vehicle.Pointer + 0x60);
             if (statsPtr != IntPtr.Zero)
             {
                 IntPtr statsKlass = IL2CPP.il2cpp_object_get_class(statsPtr);
@@ -157,7 +157,7 @@ static class EngineSwapper
                     Plugin.L.LogInfo($"[ENG] VehicleStats.Torque → {newTorque:F3}");
 
                     // Push the recomputed torque into the live CarEngine.
-                    IntPtr simPtr = Marshal.ReadIntPtr(vehicle.Pointer + 0x58);
+                    IntPtr simPtr = Marshal.ReadIntPtr(vehicle.Pointer + 0x68);
                     if (simPtr != IntPtr.Zero)
                     {
                         IntPtr engPtr = Marshal.ReadIntPtr(simPtr + 0x30);
@@ -405,6 +405,8 @@ static class VehicleUpdatePatch
         MeshReplacer.FixPaintMasks();
         MeshReplacer.FixAlbedos();
         MeshReplacer.UpdateAllLampPositions();
+        MeshReplacer.UpdateSpinners();
+        MeshReplacer.FixWheelAxes();
 
         // Periodic LensFlare scan — every 300 frames, only for our custom vehicle
         if (frame - _lastScanFrame > 300)
@@ -586,12 +588,12 @@ static class VehicleBodyPartInitMaterialsPatch
             if (v == null || VehicleFactory.GetDefForVehicle(v) == null) return;
             string id = "?";
             try { id = __instance.ID ?? "null"; } catch { }
-            string bodyMat  = LampDiag.ReadNativeMatName(__instance.Pointer + 0x80);
-            string frontMat = LampDiag.ReadNativeMatName(__instance.Pointer + 0x90);
-            string rearMat  = LampDiag.ReadNativeMatName(__instance.Pointer + 0x98);
-            IntPtr bodyPtr  = LampDiag.SafeReadPtr(__instance.Pointer + 0x80);
-            IntPtr frontPtr = LampDiag.SafeReadPtr(__instance.Pointer + 0x90);
-            IntPtr rearPtr  = LampDiag.SafeReadPtr(__instance.Pointer + 0x98);
+            string bodyMat  = LampDiag.ReadNativeMatName(__instance.Pointer + 0x90);
+            string frontMat = LampDiag.ReadNativeMatName(__instance.Pointer + 0xA0);
+            string rearMat  = LampDiag.ReadNativeMatName(__instance.Pointer + 0xA8);
+            IntPtr bodyPtr  = LampDiag.SafeReadPtr(__instance.Pointer + 0x90);
+            IntPtr frontPtr = LampDiag.SafeReadPtr(__instance.Pointer + 0xA0);
+            IntPtr rearPtr  = LampDiag.SafeReadPtr(__instance.Pointer + 0xA8);
             Plugin.L.LogInfo($"[VBP-INIT/POST] id='{id}' body='{bodyMat}'(0x{bodyPtr:X}) front='{frontMat}'(0x{frontPtr:X}) rear='{rearMat}'(0x{rearPtr:X})");
         }
         catch (Exception e) { Plugin.L.LogWarning($"[VBP-INIT] postfix ERR: {e.Message}"); }
@@ -609,7 +611,7 @@ static class VehicleBodyInitMaterialsPatch
             var v = __instance.vehicle;
             if (v == null || VehicleFactory.GetDefForVehicle(v) == null) return;
             // Read vb.parts ptr via raw (typed access returns null per CLAUDE.md)
-            IntPtr partsPtr = LampDiag.SafeReadPtr(__instance.Pointer + 0x80);
+            IntPtr partsPtr = LampDiag.SafeReadPtr(__instance.Pointer + 0x90);
             Plugin.L.LogInfo($"[VB-INITMAT/PRE] vb.parts raw ptr=0x{partsPtr:X}");
         }
         catch { }
@@ -762,7 +764,7 @@ static class VehicleLampsControllerInitPowerBufferPatch
             if (v == null || VehicleFactory.GetDefForVehicle(v) == null) return;
             try
             {
-                IntPtr bufPtr = Marshal.ReadIntPtr(__instance.Pointer + 0x40);
+                IntPtr bufPtr = Marshal.ReadIntPtr(__instance.Pointer + 0x50);
                 Plugin.L.LogInfo($"[LC-POWBUF/POST] powersBuffer=0x{bufPtr:X}");
                 if (bufPtr != IntPtr.Zero)
                 {
@@ -874,5 +876,96 @@ static class VehicleLampsControllerUpdateLampsPatch
             LampDiag.LogLive(v, "ULAMPS", force: true);
         }
         catch { }
+    }
+}
+
+// ─── Helicopter flight controller ───
+
+// Arcade heli model: LeftShift/LeftCtrl hold a target altitude, WASD tilt the
+// body and pitch produces forward thrust. Yaw is our own accumulator, not the
+// rigidbody's, so thrust direction always matches the rotation we set.
+static class HeliController
+{
+    const float LiftSpeed      = 5f;    // m/s altitude change
+    const float Kp             = 20f;   // altitude spring
+    const float Kd             = 8f;    // altitude damping
+    const float MaxTiltDeg     = 20f;
+    const float TiltRateDegSec = 60f;
+    const float YawRateDegSec  = 60f;   // yaw rate at full roll
+    const float ForwardAccel   = 12f;   // m/s2 horizontal at max pitch
+    const float LateralDamping = 4f;    // drag across current heading
+
+    static float  _targetY;
+    static float  _pitchDeg;
+    static float  _rollDeg;
+    static float  _yawDeg;
+    static IntPtr _lastPtr = IntPtr.Zero;
+
+    public static void OnFixedUpdate(Game.Vehicle vehicle)
+    {
+        if (!vehicle.IsLocalPlayer) return;
+        var def = VehicleFactory.GetDefForVehicle(vehicle);
+        if (def == null || !def.IsHelicopter) return;
+
+        var body = vehicle.simulation?.body;
+        var rb   = body?.rigidbody;
+        if (rb == null) return;
+
+        if (vehicle.Pointer != _lastPtr)
+        {
+            _targetY  = rb.position.y;
+            _yawDeg   = rb.rotation.eulerAngles.y;
+            _pitchDeg = 0f;
+            _rollDeg  = 0f;
+            _lastPtr  = vehicle.Pointer;
+            Plugin.L.LogInfo($"[HELI] Init y={_targetY:F2} yaw={_yawDeg:F1}");
+        }
+
+        float dt = Time.fixedDeltaTime;
+
+        if (Input.GetKey(KeyCode.LeftShift))
+            _targetY += LiftSpeed * dt;
+        else if (Input.GetKey(KeyCode.LeftControl))
+            _targetY -= LiftSpeed * dt;
+
+        float err   = _targetY - rb.position.y;
+        float liftF = err * Kp - rb.velocity.y * Kd - Physics.gravity.y;
+        rb.AddForce(new Vector3(0f, liftF * rb.mass, 0f));
+
+        // grounded: bleed tilt to zero, follow the real yaw, skip flight forces
+        bool airborne = !Physics.Raycast(rb.position + Vector3.up * 0.3f, Vector3.down, 2.0f);
+        if (!airborne)
+        {
+            _pitchDeg = Mathf.MoveTowards(_pitchDeg, 0f, TiltRateDegSec * dt);
+            _rollDeg  = Mathf.MoveTowards(_rollDeg,  0f, TiltRateDegSec * dt);
+            _yawDeg   = rb.rotation.eulerAngles.y;
+            return;
+        }
+
+        float pitchTarget = (Input.GetKey(KeyCode.W) ? 1f : 0f) - (Input.GetKey(KeyCode.S) ? 1f : 0f);
+        float rollTarget  = (Input.GetKey(KeyCode.D) ? 1f : 0f) - (Input.GetKey(KeyCode.A) ? 1f : 0f);
+
+        _pitchDeg = Mathf.MoveTowards(_pitchDeg, pitchTarget * MaxTiltDeg, TiltRateDegSec * dt);
+        _rollDeg  = Mathf.MoveTowards(_rollDeg,  rollTarget  * MaxTiltDeg, TiltRateDegSec * dt);
+        _yawDeg  += _rollDeg * (YawRateDegSec / MaxTiltDeg) * dt;
+
+        rb.angularVelocity = Vector3.zero;
+        rb.MoveRotation(Quaternion.Euler(_pitchDeg, _yawDeg, -_rollDeg));
+
+        Vector3 hvel   = new Vector3(rb.velocity.x, 0f, rb.velocity.z);
+        Vector3 fwdDir = Quaternion.Euler(0f, _yawDeg, 0f) * Vector3.forward;
+        Vector3 latVel = hvel - Vector3.Project(hvel, fwdDir);
+        rb.AddForce(-latVel * (LateralDamping * rb.mass));
+        rb.AddForce(fwdDir * (Mathf.Sin(_pitchDeg * Mathf.Deg2Rad) * ForwardAccel * rb.mass));
+    }
+}
+
+[HarmonyPatch(typeof(Game.Vehicle), "FixedUpdate")]
+static class VehicleFixedUpdatePatch
+{
+    static void Postfix(Game.Vehicle __instance)
+    {
+        try { HeliController.OnFixedUpdate(__instance); }
+        catch (Exception e) { Plugin.L.LogWarning($"[HELI] {e.Message}"); }
     }
 }

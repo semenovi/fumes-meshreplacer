@@ -10,6 +10,7 @@ static class VehiclePatcher
     {
         PatchVehicleBody(vehicleRoot, def.VehicleBody);
         PatchAntenna(vehicleRoot, def.AntennaPosition);
+        PatchSuspensionAxes(vehicleRoot, def.SuspensionAxes);
     }
 
     static void PatchVehicleBody(Transform vehicleRoot, VehicleBodyConfig? cfg)
@@ -277,6 +278,53 @@ static class VehiclePatcher
         }
         catch { }
         return null;
+    }
+
+    // SuspensionType.axes[i].track is zeroed by RuntimeInit after it is copied into the
+    // wheels, so patching it later does nothing. Instead FixWheelAxes writes the live
+    // Wheel positions every frame. Here we just collect the axle components (no typed
+    // wrapper - matched by native class name) sorted front-to-rear and hand them off.
+    static void PatchSuspensionAxes(Transform vehicleRoot, SuspensionAxisPatch[]? patches)
+    {
+        if (patches == null || patches.Length == 0) return;
+        try
+        {
+            var allComps = vehicleRoot.GetComponentsInChildren<Component>(true);
+            if (allComps == null) { Plugin.L.LogWarning("[WHL] GetComponentsInChildren returned null"); return; }
+
+            var wheelGos = new System.Collections.Generic.List<Transform>();
+            var axles    = new System.Collections.Generic.List<(IntPtr ptr, Transform tf, float z)>();
+            foreach (var c in allComps)
+            {
+                try
+                {
+                    if (c == null) continue;
+                    IntPtr klass    = IL2CPP.il2cpp_object_get_class(c.Pointer);
+                    string typeName = Marshal.PtrToStringAnsi(IL2CPP.il2cpp_class_get_name(klass)) ?? "";
+                    if (typeName == "WheelRepresentation")
+                        wheelGos.Add(c.transform);
+                    else if (typeName == "AxisAnimator")
+                        axles.Add((c.Pointer, c.transform, vehicleRoot.InverseTransformPoint(c.transform.position).z));
+                }
+                catch { }
+            }
+
+            Plugin.L.LogInfo($"[WHL] Found {axles.Count} AxisAnimator(s), {wheelGos.Count} WheelRepresentation(s)");
+            if (axles.Count == 0) { Plugin.L.LogWarning("[WHL] No AxisAnimators found"); return; }
+
+            axles.Sort((a, b) => b.z.CompareTo(a.z)); // largest Z first -> index 0 = front
+            var sortedAxisPtrs = new IntPtr[axles.Count];
+            var sortedAxisTfs  = new Transform[axles.Count];
+            for (int i = 0; i < axles.Count; i++)
+            {
+                sortedAxisPtrs[i] = axles[i].ptr;
+                sortedAxisTfs[i]  = axles[i].tf;
+                Plugin.L.LogInfo($"[WHL] axle[{i}] AxisAnimator z={axles[i].z:F3}");
+            }
+
+            MeshReplacer.RegisterWheelAxes(vehicleRoot, patches, sortedAxisPtrs, sortedAxisTfs, wheelGos);
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"[WHL] PatchSuspensionAxes: {e.Message}"); }
     }
 
     static PositionPivot PP(float[] v)  { var p = new PositionPivot(); p.position = V3(v); return p; }

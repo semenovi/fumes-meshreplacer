@@ -41,8 +41,13 @@ static class LampDiag
 
     static readonly Dictionary<IntPtr, LiveSnapshot> _lastLive = new();
 
+    // master switch for all diagnostic dumps; set MESHREPLACER_LAMPDIAG=1 to enable
+    public static readonly bool Enabled =
+        Environment.GetEnvironmentVariable("MESHREPLACER_LAMPDIAG") == "1";
+
     public static bool ShouldTrace(Game.Vehicle vehicle)
     {
+        if (!Enabled) return false;
         try
         {
             string bodyId = vehicle?.config?.body?.Type?.id ?? "";

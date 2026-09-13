@@ -24,6 +24,21 @@ public class MeshEntry
     // After materialSlots are applied, replace any front-lamp slot with VehicleBody.frontLampsMaterials[0]
     // so the panel shares the same material pointer registered in VehicleLampsController's GPUBuffer.
     public bool      SyncFrontLampSlot { get; set; }
+    // deactivate the target GO (no mesh needed) - hides stock parts the mod does not replace
+    public bool      Disable           { get; set; }
+    // max RPM around SpinAxis; spawns a pivot GO under vehicleMarker at the mesh bounds centre
+    public float     SpinRPM           { get; set; }
+    // local spin axis; default [0,1,0]
+    public float[]?  SpinAxis          { get; set; }
+    // trailing motion blur: ghost copies of the blade lagging behind, alpha decaying with distance
+    public bool      SpinBlur          { get; set; }
+    // closest-ghost alpha at full engine speed
+    public float     SpinBlurAlpha     { get; set; } = 0.8f;
+    // total angular spread of the ghost trail, degrees
+    public float     SpinBlurTrailAngle { get; set; } = 25f;
+    public int       SpinBlurGhosts    { get; set; } = 6;
+    // RGB tint for ghosts; [1,1,1] passes the albedo through unchanged
+    public float[]?  SpinBlurColor     { get; set; }
 }
 
 public class EngineSwapDef
@@ -51,8 +66,22 @@ public class ShaftConfig
 
 public class HardpointPatch
 {
-    public int     Index    { get; set; }
-    public float[] Position { get; set; } = new float[3];
+    public int      Index       { get; set; }
+    public float[]  Position    { get; set; } = new float[3];
+    public float[]? Orientation { get; set; }
+    public bool?    Side        { get; set; }
+}
+
+public class SuspensionAxisPatch
+{
+    // axle index, front-to-rear (largest vehicle-local Z first)
+    public int    Index { get; set; }
+    // wheel track width; 0 merges both wheels to centre
+    public float? Track     { get; set; }
+    // wheel offset from default, +up
+    public float? PositionY { get; set; }
+    // wheel offset from default, +forward
+    public float? PositionZ { get; set; }
 }
 
 public class VehicleBodyConfig
@@ -84,7 +113,9 @@ public class CustomVehicleDef
     public MeshEntry[]        MeshReplacements { get; set; } = Array.Empty<MeshEntry>();
     public VehicleBodyConfig? VehicleBody      { get; set; }
     public float[]?           AntennaPosition  { get; set; }
-    public HardpointPatch[]?  Hardpoints       { get; set; }
+    public HardpointPatch[]?       Hardpoints        { get; set; }
+    // Per-axis track-width overrides applied to the vehicle's configured SuspensionType at spawn.
+    public SuspensionAxisPatch[]? SuspensionAxes   { get; set; }
 
     public string? PaintMaskTextureName { get; set; }
     public string? AlbedoTextureName    { get; set; }
@@ -113,6 +144,9 @@ public class CustomVehicleDef
     // Engine configurations to cycle through with F6.
     // Each entry specifies an engine ID (from ItemDatabase) and optional physics overrides.
     public EngineSwapDef[]? AvailableEngines { get; set; }
+
+    // helicopter flight controls: LShift/LCtrl altitude, W/S pitch (thrust), A/D roll+yaw
+    public bool IsHelicopter { get; set; }
 
     [System.Text.Json.Serialization.JsonIgnore]
     public string FolderPath { get; set; } = "";

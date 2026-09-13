@@ -451,6 +451,20 @@ static class VehicleFactory
                 if (patch.Index >= hp.Length) continue;
                 var h = hp[patch.Index];
                 h.position = V3(patch.Position);
+                // orientation/side written raw: the interop setters are unreliable here.
+                // BodyHardpointDefinition: position 0x18, orientation 0x24, side 0x30.
+                if (h.Pointer != IntPtr.Zero)
+                {
+                    if (patch.Orientation != null)
+                    {
+                        var o = V3(patch.Orientation);
+                        Marshal.WriteInt32(h.Pointer + 0x24, BitConverter.SingleToInt32Bits(o.x));
+                        Marshal.WriteInt32(h.Pointer + 0x28, BitConverter.SingleToInt32Bits(o.y));
+                        Marshal.WriteInt32(h.Pointer + 0x2C, BitConverter.SingleToInt32Bits(o.z));
+                    }
+                    if (patch.Side.HasValue)
+                        Marshal.WriteByte(h.Pointer + 0x30, patch.Side.Value ? (byte)1 : (byte)0);
+                }
                 hp[patch.Index] = h;
             }
             Plugin.L.LogInfo($"[VF] Patched {def.Hardpoints.Length} hardpoint(s) on '{bt.id}'");

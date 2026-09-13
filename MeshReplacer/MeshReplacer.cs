@@ -27,6 +27,18 @@ static class MeshReplacer
     // frame of last FindObjectsOfTypeAll retry (throttled to avoid per-frame stall)
     static int _textureRetryFrame = -1000;
     static readonly List<Transform>                                                 _lampVehicles = new();
+    // pivot GOs spun each frame; vehiclePtr reads live shaft speed, IntPtr.Zero = fixed rpm
+    static readonly List<(Transform pivot, float maxRPM, Vector3 axis, IntPtr vehiclePtr)> _spinners = new();
+    // motion-blur ghosts trailing behind a spinner; blur[0] = lerped intensity [0..1]
+    static readonly List<(List<Transform> ghostPivots, List<Material> ghostMats,
+        float peakAlpha, float trailAngle, IntPtr vehiclePtr, float[] blur,
+        Transform pivot, Vector3 axis)> _spinBlurs = new();
+    // wheel-track overrides applied every LateUpdate.
+    // axleCache stays null until physics has initialised Wheel.axisLocalPosition.
+    static readonly List<(Transform root, SuspensionAxisPatch[] patches,
+        IntPtr[] axisPtrs, Transform[] axisTfs,
+        (IntPtr axis, IntPtr right, IntPtr left, float origY, float origZ)[]? axleCache,
+        List<Transform> wheelGos)> _wheelAxes = new();
 
     public static void Apply(Transform vehicleRoot)
     {
@@ -36,10 +48,34 @@ static class MeshReplacer
         var markerGo = FindInHierarchy(vehicleRoot, def.VehicleMarker);
         if (markerGo == null) return;
 
+        var vehicleComp = vehicleRoot.GetComponent<Game.Vehicle>();
+        IntPtr vehiclePtr = vehicleComp != null ? vehicleComp.Pointer : IntPtr.Zero;
+
         foreach (var entry in def.MeshReplacements)
         {
+            if (entry.Disable)
+            {
+                // deactivate every GO with this name (parts can be duplicated, e.g. AxisShaft)
+                int disabledCount = 0;
+                var allTf = vehicleRoot.GetComponentsInChildren<Transform>(true);
+                if (allTf != null)
+                    foreach (var t in allTf)
+                        try { if (t.gameObject.name == entry.Target) { t.gameObject.SetActive(false); disabledCount++; } } catch { }
+                if (disabledCount > 0)
+                    Plugin.L.LogInfo($"[MESH] Disabled {disabledCount}x GO '{entry.Target}'");
+                else
+                    Plugin.L.LogWarning($"[MESH] Disable: GO '{entry.Target}' not found");
+                continue;
+            }
+
             var mesh = GetMesh(entry, def.FolderPath);
             if (mesh == null) continue;
+
+            if (entry.SpinRPM != 0)
+            {
+                ApplySpinner(markerGo, entry, mesh, def, vehiclePtr);
+                continue;
+            }
 
             var targetGo = entry.Target == def.VehicleMarker
                 ? markerGo
@@ -249,7 +285,7 @@ static class MeshReplacer
             IL2CPP.il2cpp_runtime_invoke(method, vb.Pointer, null, ref exc);
             if (exc != IntPtr.Zero) { Plugin.L.LogWarning("[LPOS] InitLamps threw exception"); return; }
 
-            IntPtr cbPtr = Marshal.ReadIntPtr(vb.Pointer + 0x180);
+            IntPtr cbPtr = Marshal.ReadIntPtr(vb.Pointer + 0x198);
             int nativeCbCount = -1;
             if (cbPtr != IntPtr.Zero)
             {
@@ -286,7 +322,7 @@ static class MeshReplacer
             var vb = vehicleRoot.GetComponentInChildren<Game.VehicleBody>(true);
             if (vb == null) return;
 
-            IntPtr cbPtr = Marshal.ReadIntPtr(vb.Pointer + 0x180);
+            IntPtr cbPtr = Marshal.ReadIntPtr(vb.Pointer + 0x198);
             if (cbPtr == IntPtr.Zero) { Plugin.L.LogWarning("[LPOS/FW] lampPositionsBuffer null"); return; }
 
             var lamps = vb.lamps;
@@ -372,6 +408,7 @@ static class MeshReplacer
     {
         foreach (var entry in def.MeshReplacements)
         {
+            if (entry.Disable || entry.SpinRPM != 0) continue;
             var mesh = GetMesh(entry, def.FolderPath);
             if (mesh == null) continue;
             var targetGo = entry.Target == def.VehicleMarker
@@ -429,10 +466,18 @@ static class MeshReplacer
             var vb = vehicleRoot.GetComponentInChildren<Game.VehicleBody>(true);
             if (vb == null) return;
 
-            IntPtr cbObjPtr = Marshal.ReadIntPtr(vb.Pointer + 0x180);
+            IntPtr cbObjPtr = Marshal.ReadIntPtr(vb.Pointer + 0x198);
             if (cbObjPtr == IntPtr.Zero)
             {
                 if (fullBind) Plugin.L.LogWarning("[LPOS] lampPositionsBuffer is null");
+                return;
+            }
+
+            IntPtr cbKlass = IL2CPP.il2cpp_object_get_class(cbObjPtr);
+            string cbClassName = Marshal.PtrToStringAnsi(IL2CPP.il2cpp_class_get_name(cbKlass)) ?? "";
+            if (cbClassName != "ComputeBuffer")
+            {
+                if (fullBind) Plugin.L.LogWarning($"[LPOS] VB+0x180 resolves to '{cbClassName}', not ComputeBuffer - offset changed in this game version, skipping lamp-position bind");
                 return;
             }
 
@@ -471,8 +516,8 @@ static class MeshReplacer
             var vlc = vehicle.lamps;
             if (vlc == null) return;
 
-            // GPUBuffer<float> at vlc+0x40; null before VLC.Start → not yet ready
-            IntPtr gpuBufPtr = Marshal.ReadIntPtr(vlc.Pointer + 0x40);
+            // GPUBuffer<float> at vlc+0x50; null before VLC.Start → not yet ready
+            IntPtr gpuBufPtr = Marshal.ReadIntPtr(vlc.Pointer + 0x50);
             if (gpuBufPtr == IntPtr.Zero) return;
 
             // ComputeBuffer is at GPUBuffer+0x10 (confirmed via BindBuffer(Material) disasm)
@@ -999,6 +1044,309 @@ static class MeshReplacer
         }
         _fixers.Add((mr, slots));
     }
+
+    // ─── Spinner system ───────────────────────────────────────────────────────
+
+    // Transparent material for one blur ghost copy.
+    // Uses Sprites/Default + albedo texture so blade detail shows through at partial opacity.
+    static Material? CreateGhostMaterial(Texture? albedoTex, Color tint)
+    {
+        var shader = Shader.Find("Sprites/Default");
+        if (shader == null) shader = Shader.Find("Unlit/Transparent");
+        if (shader == null) { Plugin.L.LogWarning("[SPIN] No transparent shader for blur ghost"); return null; }
+        var mat = new Material(shader) { name = "SpinBlurGhost", hideFlags = HideFlags.HideAndDontSave };
+        if (albedoTex != null) mat.mainTexture = albedoTex;
+        tint.a = 0f; // start fully transparent; alpha driven per-frame
+        mat.color = tint;
+        return mat;
+    }
+
+    static void ApplySpinner(GameObject markerGo, MeshEntry entry, Mesh mesh, CustomVehicleDef def, IntPtr vehiclePtr)
+    {
+        // Pivot GO lives at mesh.bounds.center in vehicleMarker-local space.
+        // Mesh child GO sits at -bounds.center so vertices appear at their original positions.
+        var center = mesh.bounds.center;
+
+        var pivotGo = FindInHierarchy(markerGo.transform, entry.Target);
+        bool isNew = pivotGo == null;
+        if (isNew)
+        {
+            var go = new GameObject(entry.Target);
+            go.transform.SetParent(markerGo.transform, false);
+            pivotGo = go;
+            Plugin.L.LogInfo($"[SPIN] Created pivot '{entry.Target}' under '{markerGo.name}'");
+        }
+        pivotGo.transform.localPosition = center;
+
+        const string childName = "mesh";
+        var childTf = pivotGo.transform.Find(childName);
+        GameObject meshChild = childTf != null ? childTf.gameObject : new GameObject(childName);
+        if (childTf == null) meshChild.transform.SetParent(pivotGo.transform, false);
+        meshChild.transform.localPosition = new Vector3(-center.x, -center.y, -center.z);
+
+        var mf = meshChild.GetComponent<MeshFilter>() ?? meshChild.AddComponent<MeshFilter>();
+        mf.sharedMesh = mesh;
+
+        var mr = meshChild.GetComponent<MeshRenderer>() ?? meshChild.AddComponent<MeshRenderer>();
+        if (entry.MaterialSlots != null)
+        {
+            RegisterMatSlots(mr, entry.MaterialSlots);
+        }
+        else if (isNew)
+        {
+            // Inherit body material so the spinner uses the correct Game/Car Paint shader.
+            var bodyMr = markerGo.GetComponent<MeshRenderer>();
+            if (bodyMr?.sharedMaterials != null && bodyMr.sharedMaterials.Length > 0)
+                mr.sharedMaterials = new[] { bodyMr.sharedMaterials[0] };
+        }
+
+        if (!entry.SkipTextures)
+        {
+            if (!entry.SkipPaintMask && PaintMaskRef(def) != null) RegisterPaintMask(mr, PaintMaskRef(def)!);
+            if (AlbedoRef(def) != null) RegisterAlbedo(mr, AlbedoRef(def)!, isBody: false);
+        }
+
+        var axis = entry.SpinAxis != null && entry.SpinAxis.Length == 3
+            ? new Vector3(entry.SpinAxis[0], entry.SpinAxis[1], entry.SpinAxis[2])
+            : Vector3.up;
+        RegisterSpinner(pivotGo.transform, entry.SpinRPM, axis, vehiclePtr);
+        Plugin.L.LogInfo($"[SPIN] '{entry.Target}': center=({center.x:F3},{center.y:F3},{center.z:F3}) maxRPM={entry.SpinRPM}");
+
+        if (entry.SpinBlur)
+        {
+            var tint = entry.SpinBlurColor != null && entry.SpinBlurColor.Length >= 3
+                ? new Color(entry.SpinBlurColor[0], entry.SpinBlurColor[1], entry.SpinBlurColor[2], 1f)
+                : Color.white;
+
+            var albedoRef = AlbedoRef(def);
+            Texture? albedoTex = albedoRef != null ? FindTexture(albedoRef) : null;
+
+            int ghostCount = Mathf.Max(1, entry.SpinBlurGhosts);
+
+            var ghostPivots = new List<Transform>(ghostCount);
+            var ghostMats   = new List<Material>(ghostCount);
+            bool anyFailed  = false;
+
+            for (int gi = 0; gi < ghostCount; gi++)
+            {
+                var mat = CreateGhostMaterial(albedoTex, tint);
+                if (mat == null) { anyFailed = true; break; }
+                ghostMats.Add(mat);
+
+                var ghostPivotName = entry.Target + "_ghost" + gi;
+                var existing = FindInHierarchy(markerGo.transform, ghostPivotName);
+                var ghostPivotGo = existing != null ? existing : new GameObject(ghostPivotName);
+                ghostPivotGo.transform.SetParent(markerGo.transform, false);
+                ghostPivotGo.transform.localPosition = center;
+                ghostPivots.Add(ghostPivotGo.transform);
+
+                const string ghostChildName = "mesh";
+                var gChildTf = ghostPivotGo.transform.Find(ghostChildName);
+                var ghostChild = gChildTf != null ? gChildTf.gameObject : new GameObject(ghostChildName);
+                if (gChildTf == null) ghostChild.transform.SetParent(ghostPivotGo.transform, false);
+                ghostChild.transform.localPosition = new Vector3(-center.x, -center.y, -center.z);
+
+                var gmf = ghostChild.GetComponent<MeshFilter>() ?? ghostChild.AddComponent<MeshFilter>();
+                gmf.sharedMesh = mesh;
+
+                var gmr = ghostChild.GetComponent<MeshRenderer>() ?? ghostChild.AddComponent<MeshRenderer>();
+                gmr.sharedMaterials   = new[] { mat };
+                gmr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                gmr.receiveShadows    = false;
+            }
+
+            if (!anyFailed)
+            {
+                for (int k = _spinBlurs.Count - 1; k >= 0; k--)
+                    if (_spinBlurs[k].pivot == pivotGo.transform) _spinBlurs.RemoveAt(k);
+                _spinBlurs.Add((ghostPivots, ghostMats, entry.SpinBlurAlpha,
+                                entry.SpinBlurTrailAngle, vehiclePtr, new float[1],
+                                pivotGo.transform, axis));
+                Plugin.L.LogInfo($"[SPIN] Trail blur x{ghostCount} ghosts, {entry.SpinBlurTrailAngle}deg for '{entry.Target}'");
+            }
+        }
+    }
+
+    static void RegisterSpinner(Transform pivot, float maxRPM, Vector3 axis, IntPtr vehiclePtr)
+    {
+        for (int i = 0; i < _spinners.Count; i++)
+        {
+            try { if (_spinners[i].pivot == pivot) { _spinners[i] = (pivot, maxRPM, axis, vehiclePtr); return; } }
+            catch { _spinners.RemoveAt(i--); }
+        }
+        _spinners.Add((pivot, maxRPM, axis, vehiclePtr));
+    }
+
+    // Vehicle+0x68 -> CarSimulation; +0x30 -> CarEngine; +0x38 -> Shaft; Shaft+0x18 = speed (rad/s)
+    // RevLimiter at CarEngine+0x28; RevLimiter+0x18 = maxShaftSpeed (rad/s).
+    static float GetEngineShaftFraction(IntPtr vehiclePtr)
+    {
+        try
+        {
+            if (vehiclePtr == IntPtr.Zero) return 1f;
+            IntPtr simPtr = Marshal.ReadIntPtr(vehiclePtr + 0x68);
+            if (simPtr == IntPtr.Zero) return 0f;
+            IntPtr engPtr = Marshal.ReadIntPtr(simPtr + 0x30);
+            if (engPtr == IntPtr.Zero) return 0f;
+            IntPtr shaftPtr = Marshal.ReadIntPtr(engPtr + 0x38);
+            if (shaftPtr == IntPtr.Zero) return 0f;
+            float speed    = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(shaftPtr + 0x18));
+            IntPtr revPtr  = Marshal.ReadIntPtr(engPtr + 0x28);
+            if (revPtr == IntPtr.Zero) return 0f;
+            float maxSpeed = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(revPtr + 0x18));
+            if (maxSpeed <= 0f) return 0f;
+            return Math.Abs(speed) / maxSpeed;
+        }
+        catch { return 0f; }
+    }
+
+    public static void UpdateSpinners()
+    {
+        float dt = Time.deltaTime;
+        for (int i = _spinners.Count - 1; i >= 0; i--)
+        {
+            try
+            {
+                var (pivot, maxRPM, axis, vehiclePtr) = _spinners[i];
+                if (pivot == null) { _spinners.RemoveAt(i); continue; }
+                float fraction = GetEngineShaftFraction(vehiclePtr);
+                pivot.Rotate(axis, fraction * maxRPM * 6f * dt, Space.Self);
+            }
+            catch { _spinners.RemoveAt(i); }
+        }
+
+        const float BlurLerpSpeed = 4f;
+        const float AlphaDecay    = 0.60f; // each successive ghost is 60% as opaque as the previous
+        for (int i = _spinBlurs.Count - 1; i >= 0; i--)
+        {
+            try
+            {
+                var (ghostPivots, ghostMats, peakAlpha, trailAngle, vehiclePtr, blur, pivot, axis) = _spinBlurs[i];
+                if (pivot == null) { _spinBlurs.RemoveAt(i); continue; }
+
+                float fraction = GetEngineShaftFraction(vehiclePtr);
+                // Blur fades in above 15% RPM, reaches full at 50%+.
+                float target = Mathf.Clamp01((fraction - 0.15f) / 0.35f);
+                blur[0] = Mathf.Lerp(blur[0], target, Mathf.Clamp01(BlurLerpSpeed * dt));
+
+                int n = ghostPivots.Count;
+                float step = trailAngle / n; // angular gap between consecutive ghosts
+
+                for (int gi = 0; gi < n; gi++)
+                {
+                    var gp = ghostPivots[gi];
+                    if (gp == null) continue;
+
+                    // Ghost lags behind the live blade rotation (negative = trailing).
+                    float offsetDeg = -(gi + 1) * step;
+                    gp.localRotation = pivot.localRotation * Quaternion.AngleAxis(offsetDeg, axis);
+
+                    // Closest ghost = peakAlpha, each further ghost decays exponentially.
+                    if (gi < ghostMats.Count && ghostMats[gi] != null)
+                    {
+                        float falloff = Mathf.Pow(AlphaDecay, gi);
+                        var c = ghostMats[gi].color;
+                        c.a = blur[0] * peakAlpha * falloff;
+                        ghostMats[gi].color = c;
+                    }
+                }
+            }
+            catch { _spinBlurs.RemoveAt(i); }
+        }
+    }
+
+    public static void RegisterWheelAxes(Transform vehicleRoot, SuspensionAxisPatch[] patches,
+        IntPtr[] sortedAxisPtrs, Transform[] sortedAxisTfs, List<Transform> wheelGos)
+    {
+        for (int i = _wheelAxes.Count - 1; i >= 0; i--)
+            if (_wheelAxes[i].root == vehicleRoot) _wheelAxes.RemoveAt(i);
+        _wheelAxes.Add((vehicleRoot, patches, sortedAxisPtrs, sortedAxisTfs, null, wheelGos));
+        Plugin.L.LogInfo($"[WHL] Registered {sortedAxisPtrs.Length} axle(s), {wheelGos.Count} visual wheel(s)");
+    }
+
+    // dump.cs offsets: AxisAnimator.axis 0x58; Axis.right/left 0x20/0x28;
+    // Wheel.localPosition 0x40 (read by WheelRepresentation); Wheel.axisLocalPosition 0xB0 (read by AxisAnimator.Step)
+    const int WHL_AXIS_PTR     = 0x58;
+    const int WHL_RIGHT        = 0x20;
+    const int WHL_LEFT         = 0x28;
+    const int WHL_LOCALPOS     = 0x40;
+    const int WHL_AXISLOCALPOS = 0xB0;
+
+    public static void FixWheelAxes()
+    {
+        for (int vi = _wheelAxes.Count - 1; vi >= 0; vi--)
+        {
+            try
+            {
+                var (root, patches, axisPtrs, axisTfs, axleCache, wheelGos) = _wheelAxes[vi];
+                if (root == null) { _wheelAxes.RemoveAt(vi); continue; }
+
+                if (axleCache == null)
+                {
+                    bool ready = true;
+                    var cache = new (IntPtr axis, IntPtr right, IntPtr left, float origY, float origZ)[axisPtrs.Length];
+                    for (int ai = 0; ai < axisPtrs.Length; ai++)
+                    {
+                        IntPtr axisPtr  = Marshal.ReadIntPtr(axisPtrs[ai] + WHL_AXIS_PTR);
+                        if (axisPtr == IntPtr.Zero) { ready = false; break; }
+                        IntPtr rightPtr = Marshal.ReadIntPtr(axisPtr + WHL_RIGHT);
+                        IntPtr leftPtr  = Marshal.ReadIntPtr(axisPtr + WHL_LEFT);
+                        if (rightPtr == IntPtr.Zero || leftPtr == IntPtr.Zero) { ready = false; break; }
+                        float rx = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(rightPtr + WHL_AXISLOCALPOS));
+                        if (Math.Abs(rx) < 0.001f) { ready = false; break; }
+                        float origY = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(rightPtr + WHL_LOCALPOS + 4));
+                        float origZ = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(rightPtr + WHL_LOCALPOS + 8));
+                        cache[ai] = (axisPtr, rightPtr, leftPtr, origY, origZ);
+                    }
+                    if (!ready) continue;
+
+                    axleCache = cache;
+                    for (int ai = 0; ai < cache.Length; ai++)
+                    {
+                        float rx = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(cache[ai].right + WHL_AXISLOCALPOS));
+                        Plugin.L.LogInfo($"[WHL] Cached axle[{ai}]: axisLocX={rx:F3} origY={cache[ai].origY:F3} origZ={cache[ai].origZ:F3}");
+                    }
+                    _wheelAxes[vi] = (root, patches, axisPtrs, axisTfs, axleCache, wheelGos);
+                }
+
+                foreach (var p in patches)
+                {
+                    if (p.Index < 0 || p.Index >= axleCache.Length) continue;
+                    var (axisPtr, rightPtr, leftPtr, origY, origZ) = axleCache[p.Index];
+
+                    if (p.Track.HasValue)
+                    {
+                        float half = p.Track.Value * 0.5f;
+                        Marshal.WriteInt32(rightPtr + WHL_AXISLOCALPOS,     BitConverter.SingleToInt32Bits(+half));
+                        Marshal.WriteInt32(leftPtr  + WHL_AXISLOCALPOS,     BitConverter.SingleToInt32Bits(-half));
+                        Marshal.WriteInt32(rightPtr + WHL_LOCALPOS,         BitConverter.SingleToInt32Bits(+half));
+                        Marshal.WriteInt32(leftPtr  + WHL_LOCALPOS,         BitConverter.SingleToInt32Bits(-half));
+                    }
+
+                    if (p.PositionY.HasValue)
+                    {
+                        float newY = origY + p.PositionY.Value;
+                        Marshal.WriteInt32(rightPtr + WHL_LOCALPOS     + 4, BitConverter.SingleToInt32Bits(newY));
+                        Marshal.WriteInt32(leftPtr  + WHL_LOCALPOS     + 4, BitConverter.SingleToInt32Bits(newY));
+                        Marshal.WriteInt32(rightPtr + WHL_AXISLOCALPOS + 4, BitConverter.SingleToInt32Bits(newY));
+                        Marshal.WriteInt32(leftPtr  + WHL_AXISLOCALPOS + 4, BitConverter.SingleToInt32Bits(newY));
+                    }
+
+                    if (p.PositionZ.HasValue)
+                    {
+                        float newZ = origZ + p.PositionZ.Value;
+                        Marshal.WriteInt32(rightPtr + WHL_LOCALPOS     + 8, BitConverter.SingleToInt32Bits(newZ));
+                        Marshal.WriteInt32(leftPtr  + WHL_LOCALPOS     + 8, BitConverter.SingleToInt32Bits(newZ));
+                        Marshal.WriteInt32(rightPtr + WHL_AXISLOCALPOS + 8, BitConverter.SingleToInt32Bits(newZ));
+                        Marshal.WriteInt32(leftPtr  + WHL_AXISLOCALPOS + 8, BitConverter.SingleToInt32Bits(newZ));
+                    }
+                }
+            }
+            catch (Exception e) { Plugin.L.LogWarning($"[WHL] FixWheelAxes: {e.Message}"); _wheelAxes.RemoveAt(vi); }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     static Mesh? GetMesh(MeshEntry entry, string folderPath)
     {
