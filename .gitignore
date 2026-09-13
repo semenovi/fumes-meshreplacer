@@ -4,6 +4,3 @@ MeshReplacer/.vs/
 
 # reverse-engineering artifacts (RenderDoc captures, il2cpp dump, one-off analysis scripts)
 research/
-
-# BepInEx/interop binaries, regenerated per game build - see README for how to fetch
-libs/
