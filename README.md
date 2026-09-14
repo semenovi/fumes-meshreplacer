@@ -16,7 +16,7 @@ A [BepInEx](https://github.com/BepInEx/BepInEx) plugin for [FUMES](https://store
 - Patches hardpoint positions (weapon/cargo slots) before the game places weapons in `Vehicle.Awake`
 - Patches antenna position
 - Material-slot fixer: trims excess material slots every frame so the skin system stays stable
-- F3 key cycles submesh→material mapping (diagnostic)
+- F3 key cycles submesh -> material mapping (diagnostic)
 
 ---
 
