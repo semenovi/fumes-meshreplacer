@@ -422,16 +422,21 @@ static class VehicleUpdatePatch
             if (f != _lastF6Frame) { _lastF6Frame = f; EngineSwapper.TryCycle(__instance); }
         }
 
-        int frame = Time.frameCount;
-        if (frame == _lastRunFrame) return;
-        _lastRunFrame = frame;
-
         try
         {
             var tuneDef = VehicleFactory.GetDefForVehicle(__instance);
-            if (tuneDef != null) SuspensionTuner.TickLive(__instance, tuneDef);
+            if (tuneDef != null)
+            {
+                SuspensionTuner.TickLive(__instance, tuneDef);            // now a no-op write, logs only
+                SuspensionTuner.FixPreviewRigidbody(__instance, tuneDef); // stops the garage ClampVehicle/gravity fight
+                SuspensionTuner.DiagnoseJitter(__instance, tuneDef);      // logs only on frame-to-frame movement
+            }
         }
         catch { }
+
+        int frame = Time.frameCount;
+        if (frame == _lastRunFrame) return;
+        _lastRunFrame = frame;
 
         MeshReplacer.FixMaterialSlots();
         MeshReplacer.FixMatSlots();
@@ -568,7 +573,11 @@ static class VehicleStartPatch
         try
         {
             var def = VehicleFactory.GetDefForVehicle(__instance);
-            if (def != null) SuspensionTuner.ApplyTopSpeed(__instance, def);
+            if (def != null)
+            {
+                SuspensionTuner.ApplyTopSpeed(__instance, def);
+                SuspensionTuner.ApplyMass(__instance, def);
+            }
         }
         catch (Exception e) { Plugin.L.LogWarning($"[VS] Postfix tuning: {e.Message}"); }
 

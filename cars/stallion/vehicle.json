@@ -345,20 +345,23 @@
         "width": 1.6,
         "position": 1.15,
         "mountHeight": 0.75,
+        "height": 0.61,
         "wheelRadius": 0.356,
-        "springDistance": 0.09,
-        "springLimit": 0.11
+        "springDistance": 0.11,
+        "springLimit": 0.12
       },
       {
         "index": 1,
         "width": 1.75,
         "position": -1.45,
         "mountHeight": 0.75,
+        "height": 0.60,
         "wheelRadius": 0.356,
-        "springDistance": 0.09,
-        "springLimit": 0.11
+        "springDistance": 0.13,
+        "springLimit": 0.14
       }
     ]
   },
-  "maxSpeedKph": 280
+  "maxSpeedKph": 280,
+  "mass": 1300
 }

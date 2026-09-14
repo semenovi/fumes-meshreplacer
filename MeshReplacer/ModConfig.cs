@@ -155,45 +155,19 @@ public class CustomVehicleDef
     public VehicleBodyConfig? VehicleBody      { get; set; }
     public float[]?           AntennaPosition  { get; set; }
     public HardpointPatch[]?       Hardpoints        { get; set; }
-    // Per-axis track-width overrides applied to the vehicle's configured SuspensionType at spawn.
     public SuspensionAxisPatch[]? SuspensionAxes   { get; set; }
-    // Target top speed in km/h. Writes CarBody.maxSpeed, which the game uses to build the gears.
     public float? MaxSpeedKph { get; set; }
-
-    // Grip and axle geometry, applied to per-body clones of the listed suspensions.
+    public float? Mass { get; set; }
     public SuspensionTuning? SuspensionTuning { get; set; }
-
     public string? PaintMaskTextureName { get; set; }
     public string? AlbedoTextureName    { get; set; }
-
-    // PNG files in the vehicle folder, used instead of the *TextureName lookups.
-    // Needed when the albedo/paint mask are patched copies of a stock texture
-    // (UV de-duplication moves islands and copies their pixels — see uv_dedup.py).
     public string? PaintMaskTextureFile { get; set; }
     public string? AlbedoTextureFile    { get; set; }
-
-    // Keep the game's InitLampsMeshes-generated body mesh (with runtime-computed lamp
-    // index channel) instead of reverting to the bundle mesh with hand-authored UV1.
-    // Original game meshes ship WITHOUT UV1 — the lamp index data is generated at
-    // runtime, so the generated mesh is the authoritative source of lamp indexing.
     public bool KeepGameLampMesh { get; set; }
-
-    // DEBUG: every frame bind a constant all-ones _LampsPowers buffer to the rear lamp
-    // materials. If the rear glass lights up, the power buffer binding is the problem;
-    // if it stays dark, the lamp index path (TEXCOORD1) or shader inputs are at fault.
     public bool DebugForceRearPowers { get; set; }
-
-    // Suspension type IDs (from ItemDatabase) that should be available in the garage for this body.
-    // Each listed suspension is cloned and bound to this custom body type so the garage shows them.
     public string[]? AvailableSuspensions { get; set; }
-
-    // Engine configurations to cycle through with F6.
-    // Each entry specifies an engine ID (from ItemDatabase) and optional physics overrides.
     public EngineSwapDef[]? AvailableEngines { get; set; }
-
-    // helicopter flight controls: LShift/LCtrl altitude, W/S pitch (thrust), A/D roll+yaw
     public bool IsHelicopter { get; set; }
-
     [System.Text.Json.Serialization.JsonIgnore]
     public string FolderPath { get; set; } = "";
 }

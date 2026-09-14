@@ -136,6 +136,21 @@ static class SuspensionTuner
         catch (Exception e) { Plugin.L.LogWarning($"[PERF] ApplyTopSpeed: {e.Message}"); }
     }
 
+    public static void ApplyMass(Game.Vehicle vehicle, CustomVehicleDef def)
+    {
+        float? want = def.Mass;
+        if (!want.HasValue) return;
+        try
+        {
+            var rb = vehicle.GetComponent<Rigidbody>();
+            if (rb == null) { Plugin.L.LogWarning("[PERF] Rigidbody is null"); return; }
+            float stock = rb.mass;
+            rb.mass = want.Value;
+            Plugin.L.LogInfo($"[PERF] Rigidbody.mass {stock:F1} -> {want.Value:F1} kg");
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"[PERF] ApplyMass: {e.Message}"); }
+    }
+
     const int SIM_TRANSMISSION = 0x60;  // CarSimulation.transmission
     const int SIM_ENGINE       = 0x30;  // CarSimulation.engine
     const int TRANS_GEARS      = 0x18;  // CarTransmission.gears
@@ -181,10 +196,6 @@ static class SuspensionTuner
         catch (Exception e) { Plugin.L.LogWarning($"[PERF] RebuildGears: {e.Message}"); }
     }
 
-    // The wheels are already built by the time Vehicle.Start runs, and CarSuspension has no
-    // re-init (only a ctor), so the type patch above only takes effect on later spawns.
-    // Push the same geometry straight into the live Wheels, derived the way the definition
-    // means it: hub sits at mountHeight - height, the strut mount at mountHeight.
     const int SIM_SUSPENSION  = 0x68;   // CarSimulation.suspension
     const int SUSP_WHEELS     = 0x28;   // CarSuspension.wheels
     const int WHEEL_LOCALPOS  = 0x40;
@@ -194,9 +205,6 @@ static class SuspensionTuner
     const int WHEEL_SPRINGDIST  = 0x130;  // maxSpringDistance
     const int WHEEL_SPRINGLIMIT = 0x140;  // springDistanceLimit
 
-    // Wheel.localPosition is still all-zero during Vehicle.Start, so the axles cannot be told
-    // apart yet. Grouping there put every wheel on axle 0. Retried from LateUpdate until the
-    // positions are real, then applied once.
     static readonly HashSet<IntPtr> _livePatched = new();
 
     public static void TickLive(Game.Vehicle vehicle, CustomVehicleDef def)
@@ -240,20 +248,197 @@ static class SuspensionTuner
             {
                 if (cfg.Index < 0 || cfg.Index >= byZ.Count) continue;
                 float axleZ = byZ[cfg.Index];
-                foreach (var w in live)
-                {
-                    if (Math.Abs(w.z - axleZ) > 0.2f) continue;
-                    float sign = w.x >= 0 ? 1f : -1f;
-
-                    // geometry is NOT written here any more
-                    if (cfg.SpringDistance.HasValue) WriteFloat(w.ptr + WHEEL_SPRINGDIST,  cfg.SpringDistance.Value);
-                    if (cfg.SpringLimit.HasValue)    WriteFloat(w.ptr + WHEEL_SPRINGLIMIT, cfg.SpringLimit.Value);
-                }
+                // foreach (var w in live)
+                // {
+                //     if (Math.Abs(w.z - axleZ) > 0.2f) continue;
+                //     if (cfg.SpringDistance.HasValue) WriteFloat(w.ptr + WHEEL_SPRINGDIST,  cfg.SpringDistance.Value);
+                //     if (cfg.SpringLimit.HasValue)    WriteFloat(w.ptr + WHEEL_SPRINGLIMIT, cfg.SpringLimit.Value);
+                // }
                 Plugin.L.LogInfo($"[SUSP/live] axle[{cfg.Index}] at z={axleZ:F3} travel limits " +
-                                 $"springDistance={cfg.SpringDistance} springLimit={cfg.SpringLimit}");
+                                 $"(NOT applied, disabled) springDistance={cfg.SpringDistance} springLimit={cfg.SpringLimit}");
             }
         }
         catch (Exception e) { Plugin.L.LogWarning($"[SUSP/live] {e.Message}"); }
+    }
+
+    const int WHEEL_SPRINGDIST_CUR = 0x144; // springDistance (current, recomputed live)
+    const int WHEEL_SPRINGCOMP     = 0x14C; // springCompression
+    const int WHEEL_ATTACHED       = 0x1B0; // bool
+
+    class JitterWheel
+    {
+        public IntPtr ptr;
+        public Transform? repTf;
+        public float y, z, springDist, springComp;
+        public bool attached;
+        public bool seeded;
+    }
+
+    class JitterState
+    {
+        public List<JitterWheel> wheels = new();
+        public int lastLogFrame = -1;
+        public int linesThisSecond;
+        public float lastSecondMark;
+        public Vector3 rootPos, rootEuler;
+        public bool rootSeeded;
+        public Rigidbody? rb;
+        public bool rbSearched;
+    }
+
+    static readonly Dictionary<IntPtr, JitterState> _jitterStates = new();
+    const float EPS_POS = 0.0015f;    // ~1.5 mm
+    const float EPS_SPRING = 0.0015f;
+    const int MAX_LINES_PER_SEC = 40;
+
+    public static void FixPreviewRigidbody(Game.Vehicle vehicle, CustomVehicleDef def)
+    {
+        if (def.SuspensionTuning == null) return;
+        try
+        {
+            string? name = vehicle.name;
+            if (string.IsNullOrEmpty(name) || !name.Contains("(Clone)")) return; // never the driven 'PlayerVehicle'
+            var rb = vehicle.GetComponent<Rigidbody>();
+            if (rb == null || rb.isKinematic) return;
+            if (rb.velocity != Vector3.zero || rb.angularVelocity != Vector3.zero)
+            {
+                rb.velocity = Vector3.zero;
+                rb.angularVelocity = Vector3.zero;
+            }
+        }
+        catch { }
+    }
+
+    public static void DiagnoseJitter(Game.Vehicle vehicle, CustomVehicleDef def)
+    {
+        if (def.SuspensionTuning == null) return;
+        try
+        {
+            if (!_jitterStates.TryGetValue(vehicle.Pointer, out var state))
+            {
+                state = BuildJitterState(vehicle);
+                if (state == null) return; // not ready yet (wheels not built), retry next frame
+                _jitterStates[vehicle.Pointer] = state;
+            }
+
+            float now = Time.unscaledTime;
+            if (now - state.lastSecondMark >= 1f) { state.lastSecondMark = now; state.linesThisSecond = 0; }
+
+            var root = vehicle.transform;
+            Vector3 pos = root.position;
+            Vector3 euler = root.eulerAngles;
+            if (!state.rootSeeded) { state.rootPos = pos; state.rootEuler = euler; state.rootSeeded = true; }
+            else
+            {
+                float dPos = (pos - state.rootPos).magnitude;
+                float dRotX = Mathf.DeltaAngle(state.rootEuler.x, euler.x);
+                float dRotY = Mathf.DeltaAngle(state.rootEuler.y, euler.y);
+                float dRotZ = Mathf.DeltaAngle(state.rootEuler.z, euler.z);
+                float dRot = Mathf.Abs(dRotX) + Mathf.Abs(dRotY) + Mathf.Abs(dRotZ);
+                if ((dPos > EPS_POS || dRot > 0.05f) && state.linesThisSecond < MAX_LINES_PER_SEC)
+                {
+                    state.linesThisSecond++;
+
+                    if (!state.rbSearched) { state.rb = vehicle.GetComponent<Rigidbody>(); state.rbSearched = true; }
+                    string rbInfo = "no-rigidbody";
+                    if (state.rb != null)
+                    {
+                        var rb = state.rb;
+                        rbInfo = $"rb.isKinematic={rb.isKinematic} rb.vel={rb.velocity.ToString("F4")} " +
+                                 $"rb.angVel={rb.angularVelocity.ToString("F4")} |angVel|={rb.angularVelocity.magnitude:F4}";
+                    }
+
+                    Plugin.L.LogInfo($"[JITTER/ROOT] frame={Time.frameCount} dt={Time.deltaTime * 1000f:F1}ms " +
+                        $"pos {state.rootPos.ToString("F4")}->{pos.ToString("F4")} (d={dPos * 1000f:F2}mm) " +
+                        $"euler {state.rootEuler.ToString("F3")}->{euler.ToString("F3")} (dRot={dRot:F3}deg) {rbInfo}");
+                }
+                state.rootPos = pos; state.rootEuler = euler;
+            }
+
+            foreach (var w in state.wheels)
+            {
+                if (w.ptr == IntPtr.Zero) continue;
+                float y = ReadFloat(w.ptr + WHEEL_LOCALPOS + 4);
+                float z = ReadFloat(w.ptr + WHEEL_LOCALPOS + 8);
+                float sd = ReadFloat(w.ptr + WHEEL_SPRINGDIST_CUR);
+                float sc = ReadFloat(w.ptr + WHEEL_SPRINGCOMP);
+                bool attached = Marshal.ReadByte(w.ptr + WHEEL_ATTACHED) != 0;
+                float tfY = w.repTf != null ? w.repTf.localPosition.y : float.NaN;
+
+                if (!w.seeded)
+                {
+                    w.y = y; w.z = z; w.springDist = sd; w.springComp = sc; w.attached = attached;
+                    w.seeded = true;
+                    continue;
+                }
+
+                bool moved = Math.Abs(y - w.y) > EPS_POS || Math.Abs(z - w.z) > EPS_POS ||
+                             Math.Abs(sd - w.springDist) > EPS_SPRING || Math.Abs(sc - w.springComp) > EPS_SPRING ||
+                             attached != w.attached;
+
+                if (moved && state.linesThisSecond < MAX_LINES_PER_SEC)
+                {
+                    state.linesThisSecond++;
+                    Plugin.L.LogInfo($"[JITTER] frame={Time.frameCount} dt={Time.deltaTime * 1000f:F1}ms " +
+                        $"wheel@{w.ptr.ToInt64():X} y={w.y:F4}->{y:F4} z={w.z:F4}->{z:F4} " +
+                        $"springDist={w.springDist:F4}->{sd:F4} springComp={w.springComp:F4}->{sc:F4} " +
+                        $"attached={w.attached}->{attached} repTf.y={tfY:F4}");
+                }
+
+                w.y = y; w.z = z; w.springDist = sd; w.springComp = sc; w.attached = attached;
+            }
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"[JITTER] {e.Message}"); }
+    }
+
+    static JitterState? BuildJitterState(Game.Vehicle vehicle)
+    {
+        IntPtr sim = Marshal.ReadIntPtr(vehicle.Pointer + VEH_SIMULATION);
+        if (sim == IntPtr.Zero) return null;
+        IntPtr susp = Marshal.ReadIntPtr(sim + SIM_SUSPENSION);
+        if (susp == IntPtr.Zero) return null;
+        IntPtr wheels = Marshal.ReadIntPtr(susp + SUSP_WHEELS);
+        if (wheels == IntPtr.Zero) return null;
+        long n = Marshal.ReadInt64(wheels + ARRAY_LENGTH);
+        if (n <= 0) return null;
+
+        var repTfs = new List<Transform>();
+        var allComps = vehicle.transform.GetComponentsInChildren<Component>(true);
+        if (allComps != null)
+        {
+            foreach (var c in allComps)
+            {
+                try
+                {
+                    if (c == null) continue;
+                    IntPtr klass = IL2CPP.il2cpp_object_get_class(c.Pointer);
+                    string typeName = Marshal.PtrToStringAnsi(IL2CPP.il2cpp_class_get_name(klass)) ?? "";
+                    if (typeName == "WheelRepresentation") repTfs.Add(c.transform);
+                }
+                catch { }
+            }
+        }
+
+        var state = new JitterState();
+        for (int i = 0; i < n; i++)
+        {
+            IntPtr w = Marshal.ReadIntPtr(wheels + ARRAY_DATA + i * 8);
+            if (w == IntPtr.Zero) continue;
+            float wz = ReadFloat(w + WHEEL_LOCALPOS + 8);
+
+            Transform? best = null;
+            float bestD = float.MaxValue;
+            foreach (var tf in repTfs)
+            {
+                float tz = vehicle.transform.InverseTransformPoint(tf.position).z;
+                float d = Math.Abs(tz - wz);
+                if (d < bestD) { bestD = d; best = tf; }
+            }
+
+            state.wheels.Add(new JitterWheel { ptr = w, repTf = best });
+        }
+        Plugin.L.LogInfo($"[JITTER] tracking {state.wheels.Count} wheel(s) on '{vehicle.name}'");
+        return state;
     }
 
     static void WriteFloat(IntPtr at, float value)
