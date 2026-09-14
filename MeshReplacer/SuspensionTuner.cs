@@ -291,6 +291,9 @@ static class SuspensionTuner
     const float EPS_SPRING = 0.0015f;
     const int MAX_LINES_PER_SEC = 40;
 
+    const int SETTLE_GRACE_FRAMES = 120;
+    static readonly Dictionary<IntPtr, int> _spawnFrame = new();
+
     public static void FixPreviewRigidbody(Game.Vehicle vehicle, CustomVehicleDef def)
     {
         if (def.SuspensionTuning == null) return;
@@ -300,6 +303,14 @@ static class SuspensionTuner
             if (string.IsNullOrEmpty(name) || !name.Contains("(Clone)")) return; // never the driven 'PlayerVehicle'
             var rb = vehicle.GetComponent<Rigidbody>();
             if (rb == null || rb.isKinematic) return;
+
+            if (!_spawnFrame.TryGetValue(vehicle.Pointer, out int spawnFrame))
+            {
+                spawnFrame = Time.frameCount;
+                _spawnFrame[vehicle.Pointer] = spawnFrame;
+            }
+            if (Time.frameCount - spawnFrame < SETTLE_GRACE_FRAMES) return; // let it fall and settle first
+
             if (rb.velocity != Vector3.zero || rb.angularVelocity != Vector3.zero)
             {
                 rb.velocity = Vector3.zero;
