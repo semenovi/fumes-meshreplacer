@@ -60,7 +60,7 @@ static class VehiclePatcher
                             continue;
                         }
                         // Write isFront (bool, offset 0x10) and bulbPosition.position
-                        // (Vector3, offset 0x20) directly — property setters don't work
+                        // (Vector3, offset 0x20) directly. Property setters don't work
                         // on il2cpp_object_new-allocated objects before GC registration.
                         Marshal.WriteByte(IntPtr.Add(ptr, 0x10),
                             cfg.Lamps[i].Front ? (byte)1 : (byte)0);
@@ -238,6 +238,27 @@ static class VehiclePatcher
             if (mats != null)
                 for (int i = 0; i < mats.Length; i++)
                     Plugin.L.LogInfo($"[MAT-DIAG]   slot[{i}] = '{mats[i]?.name}'");
+
+            // every other renderer carrying a replaced mesh, so part materials are visible too
+            var all = root.GetComponentsInChildren<MeshRenderer>(true);
+            if (all == null) return;
+            foreach (var r in all)
+            {
+                try
+                {
+                    if (r == null || r.gameObject == caroModel) continue;
+                    var rmf = r.GetComponent<MeshFilter>();
+                    var rmesh = rmf?.sharedMesh;
+                    var mname = rmesh?.name ?? "";
+                    if (!mname.StartsWith("furrari")) continue;
+                    var rmats = r.sharedMaterials;
+                    var names = new System.Collections.Generic.List<string>();
+                    if (rmats != null)
+                        foreach (var m in rmats) names.Add(m?.name ?? "null");
+                    Plugin.L.LogInfo($"[MAT-DIAG] {r.gameObject.name} mesh='{mname}' subs={rmesh?.subMeshCount} mats=[{string.Join(", ", names)}]");
+                }
+                catch { }
+            }
         }
         catch (Exception e) { Plugin.L.LogWarning($"[MAT-DIAG] {e.Message}"); }
     }

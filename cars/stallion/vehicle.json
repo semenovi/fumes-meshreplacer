@@ -1,0 +1,364 @@
+{
+  "id": "body-stallion",
+  "baseBodyId": "body-caro",
+  "displayName": "Stallion",
+  "vehicleMarker": "CaroModel",
+  "meshReplacements": [
+    {
+      "bundle": "stallionbody",
+      "candidates": [
+        "furraribody"
+      ],
+      "target": "CaroModel",
+      "isBody": true,
+      "fixMaterialSlots": true
+    },
+    {
+      "bundle": "stallionhood",
+      "candidates": [
+        "furrarihood"
+      ],
+      "target": "CaroHood",
+      "materialSlots": [
+        ""
+      ]
+    },
+    {
+      "bundle": "stallionchrome01",
+      "candidates": [
+        "furrarichrome01"
+      ],
+      "target": "CaroChromeDetails01",
+      "materialSlots": [
+        "@body:0"
+      ],
+      "targetPosition": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "bundle": "stallionchrome02",
+      "candidates": [
+        "furrarichrome02"
+      ],
+      "target": "CaroChromeDetails02",
+      "materialSlots": [
+        "",
+        "CaroLampFrontMaterial"
+      ],
+      "syncFrontLampSlot": true,
+      "targetPosition": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "bundle": "stallionchrome03",
+      "candidates": [
+        "furrarichrome03"
+      ],
+      "target": "CaroChromeDetails03",
+      "materialSlots": [
+        "@body:0"
+      ],
+      "targetPosition": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "bundle": "stallionbumper01",
+      "candidates": [
+        "furraribumper01"
+      ],
+      "target": "CaroBumper01",
+      "materialSlots": [
+        "@body:0"
+      ],
+      "targetPosition": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "bundle": "stallionexhaust02",
+      "candidates": [
+        "furrariexhaust02"
+      ],
+      "target": "CaroExhaust02",
+      "materialSlots": [
+        ""
+      ],
+      "targetPosition": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "bundle": "stalliondoorl",
+      "candidates": [
+        "furraridoorl"
+      ],
+      "target": "CaroDoorL",
+      "fixMaterialSlots": true
+    },
+    {
+      "bundle": "stalliondoorr",
+      "candidates": [
+        "furraridoorr"
+      ],
+      "target": "CaroDoorR",
+      "fixMaterialSlots": true
+    },
+    {
+      "bundle": "stallionlamppodl",
+      "candidates": [
+        "furrarilamppodl"
+      ],
+      "target": "CaroPanelL",
+      "materialSlots": [
+        "@body:0"
+      ],
+      "targetPosition": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "bundle": "stallionlamppodr",
+      "candidates": [
+        "furrarilamppodr"
+      ],
+      "target": "CaroPanelR",
+      "materialSlots": [
+        "@body:0"
+      ],
+      "targetPosition": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "target": "CaroDoorRear",
+      "disable": true
+    },
+    {
+      "target": "CaroExhaust02A",
+      "disable": true
+    },
+    {
+      "target": "CaroExhaust02B",
+      "disable": true
+    },
+    {
+      "gameMesh": "CaroEngine",
+      "target": "CaroEngine",
+      "targetPosition": [
+        0.0,
+        0.39,
+        -1.25
+      ],
+      "skipTextures": true
+    }
+  ],
+  "vehicleBody": {
+    "frontLampsColor": [
+      1.0,
+      0.7882353,
+      0.49411765,
+      1.0
+    ],
+    "lamps": [
+      {
+        "front": true,
+        "bulb": [
+          0.4889,
+          0.3403,
+          2.3292
+        ]
+      },
+      {
+        "front": true,
+        "bulb": [
+          -0.4889,
+          0.3403,
+          2.3292
+        ]
+      },
+      {
+        "front": true,
+        "bulb": [
+          0.6382,
+          0.5933,
+          2.0127
+        ]
+      },
+      {
+        "front": true,
+        "bulb": [
+          0.4774,
+          0.6002,
+          2.0567
+        ]
+      },
+      {
+        "front": true,
+        "bulb": [
+          -0.4774,
+          0.6002,
+          2.0567
+        ]
+      },
+      {
+        "front": true,
+        "bulb": [
+          -0.6382,
+          0.5933,
+          2.0127
+        ]
+      },
+      {
+        "front": true,
+        "bulb": [
+          0.4438,
+          1.1653,
+          0.1526
+        ]
+      },
+      {
+        "front": true,
+        "bulb": [
+          0.2682,
+          1.1653,
+          0.1709
+        ]
+      },
+      {
+        "front": true,
+        "bulb": [
+          -0.2682,
+          1.1653,
+          0.1709
+        ]
+      },
+      {
+        "front": true,
+        "bulb": [
+          -0.4438,
+          1.1653,
+          0.1526
+        ]
+      },
+      {
+        "front": false,
+        "bulb": [
+          0.6922,
+          0.6181,
+          -2.0951
+        ]
+      },
+      {
+        "front": false,
+        "bulb": [
+          -0.6922,
+          0.6181,
+          -2.0951
+        ]
+      }
+    ],
+    "enginePosition": [
+      0.0,
+      0.39,
+      -1.25
+    ]
+  },
+  "antennaPosition": [
+    0.72,
+    0.78,
+    -1.45
+  ],
+  "hardpoints": [
+    {
+      "index": 2,
+      "position": [
+        0,
+        1.0,
+        1.8
+      ]
+    },
+    {
+      "index": 0,
+      "position": [
+        0,
+        1.3,
+        0.0
+      ]
+    },
+    {
+      "index": 1,
+      "position": [
+        0,
+        0.9,
+        -1.8
+      ]
+    },
+    {
+      "index": 3,
+      "position": [
+        0,
+        10.0,
+        0.0
+      ]
+    }
+  ],
+  "availableEngines": [
+    {
+      "id": "engine-v8",
+      "maxRPM": 9500,
+      "maxTorque": 1400
+    },
+    {
+      "id": "engine-v8-classic"
+    },
+    {
+      "id": "engine-v6"
+    },
+    {
+      "id": "engine-inline-5"
+    }
+  ],
+  "suspensionTuning": {
+    "baseSuspension": "suspension-caro-stock",
+    "gripLN": 1.15,
+    "gripLT": 0.62,
+    "axes": [
+      {
+        "index": 0,
+        "width": 1.6,
+        "position": 1.15,
+        "mountHeight": 0.75,
+        "wheelRadius": 0.356,
+        "springDistance": 0.16,
+        "springLimit": 0.18
+      },
+      {
+        "index": 1,
+        "width": 1.75,
+        "position": -1.45,
+        "mountHeight": 0.75,
+        "wheelRadius": 0.356,
+        "springDistance": 0.16,
+        "springLimit": 0.18
+      }
+    ]
+  },
+  "maxSpeedKph": 280
+}

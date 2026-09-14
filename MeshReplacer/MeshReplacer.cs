@@ -12,7 +12,7 @@ static class MeshReplacer
     // Material name -> Material (for materialSlots lookups)
     static readonly Dictionary<string, Material?> _matCache  = new();
     static readonly List<(MeshRenderer mr, int slots)>                              _fixers     = new();
-    static readonly List<(MeshRenderer mr, string[] names)>                         _matSlots   = new();
+    static readonly List<(MeshRenderer mr, string[] names, MeshRenderer? bodyMr)>   _matSlots   = new();
     // mr + cached resolved Texture (null = not yet found); applied once via MPB
     static readonly List<(MeshRenderer mr, Texture? tex, string name)>              _paintMasks = new();
     static readonly List<(MeshRenderer mr, Texture? tex, string name, bool isBody)> _albedos    = new();
@@ -37,8 +37,20 @@ static class MeshReplacer
     // axleCache stays null until physics has initialised Wheel.axisLocalPosition.
     static readonly List<(Transform root, SuspensionAxisPatch[] patches,
         IntPtr[] axisPtrs, Transform[] axisTfs,
-        (IntPtr axis, IntPtr right, IntPtr left, float origY, float origZ)[]? axleCache,
+        (IntPtr axis, IntPtr right, IntPtr left, float origY, float origZ, float origRadius)[]? axleCache,
         List<Transform> wheelGos)> _wheelAxes = new();
+    // base localScale of each visual wheel, so a radius patch stays idempotent per frame
+    static readonly Dictionary<Transform, Vector3> _wheelBaseScale = new();
+    // default shock mount per wheel, so mount offsets are applied from the stock pose
+    static readonly Dictionary<IntPtr, (float y, float z)> _mountBase = new();
+
+    static void WriteBoth(IntPtr rightPtr, IntPtr leftPtr, int offset, float? value)
+    {
+        if (!value.HasValue) return;
+        int bits = BitConverter.SingleToInt32Bits(value.Value);
+        Marshal.WriteInt32(rightPtr + offset, bits);
+        Marshal.WriteInt32(leftPtr  + offset, bits);
+    }
 
     public static void Apply(Transform vehicleRoot)
     {
@@ -120,7 +132,7 @@ static class MeshReplacer
             if (entry.MaterialSlots != null)
             {
                 var mr = targetGo.GetComponent<MeshRenderer>();
-                if (mr != null) RegisterMatSlots(mr, entry.MaterialSlots);
+                if (mr != null) RegisterMatSlots(mr, entry.MaterialSlots, markerGo.GetComponent<MeshRenderer>());
             }
 
             if (entry.TargetRotation != null)
@@ -143,9 +155,9 @@ static class MeshReplacer
             }
         }
 
-        // InitLampsMeshes was called by RuntimeInit with the ORIGINAL mesh → bake data is stale.
+        // InitLampsMeshes was called by RuntimeInit with the ORIGINAL mesh -> bake data is stale.
         // Must call InitMeshData first (updates part.mesh = mf.sharedMesh = our new mesh),
-        // then InitLampsMeshes (reads part.mesh → rebuilds bake buffer from our new mesh).
+        // then InitLampsMeshes (reads part.mesh -> rebuilds bake buffer from our new mesh).
         // Without InitMeshData first, InitLampsMeshes would reset mf.sharedMesh back to the old mesh!
         RebuildVehicleBodyLampMeshData(vehicleRoot);
         DumpBodyLampUVs(def, markerGo, "[UV2/NATIVE]");
@@ -516,7 +528,7 @@ static class MeshReplacer
             var vlc = vehicle.lamps;
             if (vlc == null) return;
 
-            // GPUBuffer<float> at vlc+0x50; null before VLC.Start → not yet ready
+            // GPUBuffer<float> at vlc+0x50; null before VLC.Start -> not yet ready
             IntPtr gpuBufPtr = Marshal.ReadIntPtr(vlc.Pointer + 0x50);
             if (gpuBufPtr == IntPtr.Zero) return;
 
@@ -541,7 +553,7 @@ static class MeshReplacer
                     if (mat != null) { mat.SetBuffer(propId, cb); count++; }
 
             if (count > 0)
-                Plugin.L.LogInfo($"[REBIND] _LampsPowers → {count} lamp material(s)");
+                Plugin.L.LogInfo($"[REBIND] _LampsPowers -> {count} lamp material(s)");
         }
         catch (Exception ex) { Plugin.L.LogWarning($"[REBIND] {ex.Message}"); }
     }
@@ -928,20 +940,20 @@ static class MeshReplacer
         }
     }
 
-    static void RegisterMatSlots(MeshRenderer mr, string[] names)
+    static void RegisterMatSlots(MeshRenderer mr, string[] names, MeshRenderer? bodyMr = null)
     {
         for (int i = 0; i < _matSlots.Count; i++)
         {
-            try { if (_matSlots[i].mr == mr) { _matSlots[i] = (mr, names); TryApplyMatSlots(i); return; } }
+            try { if (_matSlots[i].mr == mr) { _matSlots[i] = (mr, names, bodyMr); TryApplyMatSlots(i); return; } }
             catch { _matSlots.RemoveAt(i--); }
         }
-        _matSlots.Add((mr, names));
+        _matSlots.Add((mr, names, bodyMr));
         TryApplyMatSlots(_matSlots.Count - 1);
     }
 
     static void TryApplyMatSlots(int i)
     {
-        var (mr, names) = _matSlots[i];
+        var (mr, names, bodyMr) = _matSlots[i];
         var existing = mr.sharedMaterials;
         var mats = new Material[names.Length];
         for (int j = 0; j < names.Length; j++)
@@ -950,6 +962,18 @@ static class MeshReplacer
             {
                 // Keep the original material instance in this slot (preserves skin-system references).
                 mats[j] = existing != null && j < existing.Length ? existing[j] : null;
+                continue;
+            }
+            // "@body:N" takes the live instance from the body renderer's slot N, so a part
+            // painted like the hull shares the vehicle's own clone (skin/colour keep working).
+            if (names[j].StartsWith("@body:"))
+            {
+                if (bodyMr == null) return;
+                var bodyMats = bodyMr.sharedMaterials;
+                if (bodyMats == null) return;
+                if (!int.TryParse(names[j].Substring(6), out int bodySlot)) bodySlot = 0;
+                if (bodySlot < 0 || bodySlot >= bodyMats.Length) return;
+                mats[j] = bodyMats[bodySlot];
                 continue;
             }
             var m = FindMaterial(names[j]);
@@ -1090,7 +1114,7 @@ static class MeshReplacer
         var mr = meshChild.GetComponent<MeshRenderer>() ?? meshChild.AddComponent<MeshRenderer>();
         if (entry.MaterialSlots != null)
         {
-            RegisterMatSlots(mr, entry.MaterialSlots);
+            RegisterMatSlots(mr, entry.MaterialSlots, markerGo.GetComponent<MeshRenderer>());
         }
         else if (isNew)
         {
@@ -1266,6 +1290,46 @@ static class MeshReplacer
 
     // dump.cs offsets: AxisAnimator.axis 0x58; Axis.right/left 0x20/0x28;
     // Wheel.localPosition 0x40 (read by WheelRepresentation); Wheel.axisLocalPosition 0xB0 (read by AxisAnimator.Step)
+    // A visual wheel belongs to the axle whose cached local Z it sits closest to.
+    // Scaling is written from the cached base scale so re-running per frame is idempotent.
+    static void ScaleAxleWheels(Transform root, List<Transform> wheelGos,
+        (IntPtr axis, IntPtr right, IntPtr left, float origY, float origZ, float origRadius)[] axleCache,
+        int axleIndex, float factor)
+    {
+        if (wheelGos == null) return;
+        foreach (var wheelTf in wheelGos)
+        {
+            try
+            {
+                if (wheelTf == null) continue;
+                float z = root.InverseTransformPoint(wheelTf.position).z;
+                int nearest = 0;
+                float best = float.MaxValue;
+                for (int ai = 0; ai < axleCache.Length; ai++)
+                {
+                    float d = Math.Abs(z - axleCache[ai].origZ);
+                    if (d < best) { best = d; nearest = ai; }
+                }
+                if (nearest != axleIndex) continue;
+                if (!_wheelBaseScale.TryGetValue(wheelTf, out var baseScale))
+                {
+                    baseScale = wheelTf.localScale;
+                    _wheelBaseScale[wheelTf] = baseScale;
+                }
+                var want = baseScale * factor;
+                if ((wheelTf.localScale - want).sqrMagnitude > 1e-6f) wheelTf.localScale = want;
+            }
+            catch { }
+        }
+    }
+
+    const int WHL_RADIUS       = 0x1B8;
+    const int WHL_SHOCKMOUNT   = 0x80;   // shockMountBaseLocalPosition
+    const int WHL_SPRINGDIST   = 0x130;  // maxSpringDistance
+    const int WHL_SPRINGFORCE  = 0x134;  // maxSpringForce
+    const int WHL_DAMPMIN      = 0x138;  // minSpringDamping
+    const int WHL_DAMPMAX      = 0x13C;  // maxSpringDamping
+    const int WHL_SPRINGLIMIT  = 0x140;  // springDistanceLimit
     const int WHL_AXIS_PTR     = 0x58;
     const int WHL_RIGHT        = 0x20;
     const int WHL_LEFT         = 0x28;
@@ -1284,7 +1348,7 @@ static class MeshReplacer
                 if (axleCache == null)
                 {
                     bool ready = true;
-                    var cache = new (IntPtr axis, IntPtr right, IntPtr left, float origY, float origZ)[axisPtrs.Length];
+                    var cache = new (IntPtr axis, IntPtr right, IntPtr left, float origY, float origZ, float origRadius)[axisPtrs.Length];
                     for (int ai = 0; ai < axisPtrs.Length; ai++)
                     {
                         IntPtr axisPtr  = Marshal.ReadIntPtr(axisPtrs[ai] + WHL_AXIS_PTR);
@@ -1296,7 +1360,9 @@ static class MeshReplacer
                         if (Math.Abs(rx) < 0.001f) { ready = false; break; }
                         float origY = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(rightPtr + WHL_LOCALPOS + 4));
                         float origZ = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(rightPtr + WHL_LOCALPOS + 8));
-                        cache[ai] = (axisPtr, rightPtr, leftPtr, origY, origZ);
+                        float origR = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(rightPtr + WHL_RADIUS));
+                        if (origR <= 0.001f) { ready = false; break; }
+                        cache[ai] = (axisPtr, rightPtr, leftPtr, origY, origZ, origR);
                     }
                     if (!ready) continue;
 
@@ -1304,7 +1370,7 @@ static class MeshReplacer
                     for (int ai = 0; ai < cache.Length; ai++)
                     {
                         float rx = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(cache[ai].right + WHL_AXISLOCALPOS));
-                        Plugin.L.LogInfo($"[WHL] Cached axle[{ai}]: axisLocX={rx:F3} origY={cache[ai].origY:F3} origZ={cache[ai].origZ:F3}");
+                        Plugin.L.LogInfo($"[WHL] Cached axle[{ai}]: axisLocX={rx:F3} origY={cache[ai].origY:F3} origZ={cache[ai].origZ:F3} origRadius={cache[ai].origRadius:F3}");
                     }
                     _wheelAxes[vi] = (root, patches, axisPtrs, axisTfs, axleCache, wheelGos);
                 }
@@ -1312,7 +1378,7 @@ static class MeshReplacer
                 foreach (var p in patches)
                 {
                     if (p.Index < 0 || p.Index >= axleCache.Length) continue;
-                    var (axisPtr, rightPtr, leftPtr, origY, origZ) = axleCache[p.Index];
+                    var (axisPtr, rightPtr, leftPtr, origY, origZ, origRadius) = axleCache[p.Index];
 
                     if (p.Track.HasValue)
                     {
@@ -1339,6 +1405,41 @@ static class MeshReplacer
                         Marshal.WriteInt32(leftPtr  + WHL_LOCALPOS     + 8, BitConverter.SingleToInt32Bits(newZ));
                         Marshal.WriteInt32(rightPtr + WHL_AXISLOCALPOS + 8, BitConverter.SingleToInt32Bits(newZ));
                         Marshal.WriteInt32(leftPtr  + WHL_AXISLOCALPOS + 8, BitConverter.SingleToInt32Bits(newZ));
+                    }
+
+                    if (p.Radius.HasValue && p.Radius.Value > 0.001f)
+                    {
+                        Marshal.WriteInt32(rightPtr + WHL_RADIUS, BitConverter.SingleToInt32Bits(p.Radius.Value));
+                        Marshal.WriteInt32(leftPtr  + WHL_RADIUS, BitConverter.SingleToInt32Bits(p.Radius.Value));
+                        ScaleAxleWheels(root, wheelGos, axleCache, p.Index, p.Radius.Value / origRadius);
+                    }
+
+                    WriteBoth(rightPtr, leftPtr, WHL_SPRINGDIST,  p.SpringDistance);
+                    WriteBoth(rightPtr, leftPtr, WHL_SPRINGLIMIT, p.SpringLimit);
+                    WriteBoth(rightPtr, leftPtr, WHL_SPRINGFORCE, p.SpringForce);
+                    WriteBoth(rightPtr, leftPtr, WHL_DAMPMIN,     p.DampingMin);
+                    WriteBoth(rightPtr, leftPtr, WHL_DAMPMAX,     p.DampingMax);
+
+                    if (p.MountY.HasValue || p.MountZ.HasValue)
+                    {
+                        if (!_mountBase.TryGetValue(rightPtr, out var baseMount))
+                        {
+                            baseMount = (BitConverter.Int32BitsToSingle(Marshal.ReadInt32(rightPtr + WHL_SHOCKMOUNT + 4)),
+                                         BitConverter.Int32BitsToSingle(Marshal.ReadInt32(rightPtr + WHL_SHOCKMOUNT + 8)));
+                            _mountBase[rightPtr] = baseMount;
+                        }
+                        if (p.MountY.HasValue)
+                        {
+                            float y = baseMount.y + p.MountY.Value;
+                            Marshal.WriteInt32(rightPtr + WHL_SHOCKMOUNT + 4, BitConverter.SingleToInt32Bits(y));
+                            Marshal.WriteInt32(leftPtr  + WHL_SHOCKMOUNT + 4, BitConverter.SingleToInt32Bits(y));
+                        }
+                        if (p.MountZ.HasValue)
+                        {
+                            float z = baseMount.z + p.MountZ.Value;
+                            Marshal.WriteInt32(rightPtr + WHL_SHOCKMOUNT + 8, BitConverter.SingleToInt32Bits(z));
+                            Marshal.WriteInt32(leftPtr  + WHL_SHOCKMOUNT + 8, BitConverter.SingleToInt32Bits(z));
+                        }
                     }
                 }
             }

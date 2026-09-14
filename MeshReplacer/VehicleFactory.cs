@@ -9,7 +9,7 @@ static class VehicleFactory
     // Keyed by def.Id.
     static readonly Dictionary<string, CustomVehicleDef> _defs     = new();
     static readonly List<Game.BodyType>                  _clones   = new();
-    // Maps clone body id → (def, cloneBodyType, originalBodyType) for the suspension patch.
+    // Maps clone body id -> (def, cloneBodyType, originalBodyType) for the suspension patch.
     static readonly Dictionary<string, (CustomVehicleDef def, Game.BodyType clone, Game.BodyType original)> _bodyMap = new();
     static bool _bodiesInjected;
 
@@ -44,7 +44,7 @@ static class VehicleFactory
         return null;
     }
 
-    // Called from ItemDatabasePatch — just registers defs, no BodyType cloning.
+    // Called from ItemDatabasePatch, just registers defs, no BodyType cloning.
     public static void RegisterDefs()
     {
         if (_bodiesInjected) return;
@@ -87,7 +87,7 @@ static class VehicleFactory
             try { clone.RuntimeInit(); Plugin.L.LogInfo($"[VF] RuntimeInit OK on '{def.Id}'"); }
             catch (Exception e) { Plugin.L.LogWarning($"[VF] RuntimeInit failed: {e.Message}"); }
 
-            // Patch hardpoints on the clone — this is safe because it's a new object.
+            // Patch hardpoints on the clone. This is safe because it's a new object.
             PatchHardpoints(clone, def);
 
             // Replace bakeData with one generated for the custom mesh (gen_bakedata.py).
@@ -96,9 +96,9 @@ static class VehicleFactory
             ApplyCustomBakeData(clone, def);
 
             // RegisterItemType adds the clone to ItemDatabase.Bodies AND the ItemsById dict.
-            // Do NOT also call bodies.Add(clone) — the duplicate entry crashes
+            // Do NOT also call bodies.Add(clone). The duplicate entry crashes
             // SkinIconBaker.SpawnBodies (Dictionary.Add duplicate key), which kills the
-            // SkinBaker coroutine mid-bake → pixelated skins, broken compass/aiming.
+            // SkinBaker coroutine mid-bake, so skins stay unbaked (pixelated) and the compass breaks.
             try { Game.ItemDatabase.RegisterItemType(clone); } catch (Exception e) { Plugin.L.LogWarning($"[VF] RegisterItemType: {e.Message}"); }
 
             int occurrences = 0;
@@ -115,6 +115,64 @@ static class VehicleFactory
             _clones.Add(clone);
             _bodyMap[def.Id] = (def, clone, baseBody);
             Plugin.L.LogInfo($"[VF] Created body type '{def.Id}' (clone of '{def.BaseBodyId}')");
+        }
+    }
+
+    // Registers a tuned copy of a stock suspension as a real item bound to our body.
+    //
+    // Grip and axle geometry are only honoured when the game BUILDS the wheels (Vehicle.Awake),
+    // and by then a def cannot be resolved from the vehicle (config is still null). Writing the
+    // live Wheels afterwards does not stick either, the solver recomputes them, which is why
+    // the car kept floating. A registered clone sidesteps both: the player fits it in the
+    // garage and the game itself builds the wheels from our numbers.
+    public static void InjectTunedSuspensions()
+    {
+        var suspensions = Game.ItemDatabase.Suspensions;
+        if (suspensions == null) { Plugin.L.LogWarning("[SUSP] Suspensions list is null"); return; }
+
+        foreach (var kv in _bodyMap)
+        {
+            var (def, cloneBody, _) = kv.Value;
+            var tuning = def.SuspensionTuning;
+            if (tuning == null) continue;
+
+            string baseId = tuning.BaseSuspension ?? "suspension-caro-stock";
+            Game.SuspensionType? src = null;
+            int count = suspensions.Count;
+            for (int i = 0; i < count; i++)
+                try { if (suspensions[i]?.id == baseId) { src = suspensions[i]; break; } } catch { }
+            if (src == null) { Plugin.L.LogWarning($"[SUSP] base suspension '{baseId}' not found"); continue; }
+
+            Game.SuspensionType clone;
+            try { clone = UnityEngine.Object.Instantiate(src).Cast<Game.SuspensionType>(); }
+            catch (Exception e) { Plugin.L.LogError($"[SUSP] clone failed: {e.Message}"); continue; }
+
+            string newId = baseId + "-" + def.Id;
+            try
+            {
+                clone.id = newId;
+                clone.label = (src.label ?? baseId) + " " + (def.DisplayName ?? def.Id);
+                clone.body = cloneBody;
+            }
+            catch (Exception e) { Plugin.L.LogWarning($"[SUSP] set fields: {e.Message}"); }
+
+            SuspensionTuner.PatchType(clone.Pointer, tuning, baseId);
+
+            try { Game.ItemDatabase.RegisterItemType(clone); }
+            catch (Exception e) { Plugin.L.LogWarning($"[SUSP] RegisterItemType: {e.Message}"); }
+
+            bool present = false;
+            for (int i = 0; i < suspensions.Count; i++)
+                try { if (suspensions[i]?.Pointer == clone.Pointer) { present = true; break; } } catch { }
+            if (!present)
+                try { suspensions.Add(clone); } catch (Exception e) { Plugin.L.LogError($"[SUSP] add: {e.Message}"); continue; }
+
+            var list = new List<string>();
+            if (def.AvailableSuspensions != null) list.AddRange(def.AvailableSuspensions);
+            if (!list.Contains(newId)) list.Add(newId);
+            def.AvailableSuspensions = list.ToArray();
+
+            Plugin.L.LogInfo($"[SUSP] registered tuned suspension '{newId}' for '{def.Id}'");
         }
     }
 
@@ -352,7 +410,7 @@ static class VehicleFactory
         try { if (src?.engine     != null) cfg.engine     = src.engine;     } catch { }
         try { if (src?.suspension != null) cfg.suspension = src.suspension; } catch { }
         try { if (src?.wheels     != null) cfg.wheels     = src.wheels;     } catch { }
-        // Do NOT copy skin — VehicleConfigSaveData.GetSkin() resolves skin by player index,
+        // Do NOT copy skin. VehicleConfigSaveData.GetSkin() resolves skin by player index,
         // which can be out of range if src comes from a different save context (e.g. NPC config
         // or our own repaired config from the previous session). FixNullSkin assigns at Awake.
         try { if (src?.bodyColor  != null) cfg.bodyColor  = src.bodyColor;  } catch { }
@@ -362,7 +420,7 @@ static class VehicleFactory
     }
 
     // Swap vehicle's BodyItem to the base body's BodyItem before Vehicle.Start runs.
-    // Start looks up BakeData by BodyType object reference — our clone has no bake data,
+    // Start looks up BakeData by BodyType object reference, our clone has no bake data,
     // so we borrow the base vehicle's BodyItem for the duration of Start.
     public static Game.BodyItem? SwapToBaseBodyItem(Game.Vehicle vehicle)
     {

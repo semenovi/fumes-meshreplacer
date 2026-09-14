@@ -48,7 +48,7 @@ public class EngineSwapDef
     public float?  MaxTorque { get; set; }
     // Overrides physics: converted to rad/s, written to CarEngine.idleShaftSpeed (+0x30)
     public float?  IdleRPM   { get; set; }
-    // Overrides physics: converted to rad/s, written to CarEngine.revLimiter.maxShaftSpeed (+0x28→+0x18)
+    // Overrides physics: converted to rad/s, written to CarEngine.revLimiter.maxShaftSpeed (+0x28->+0x18)
     public float?  MaxRPM    { get; set; }
 }
 
@@ -72,6 +72,34 @@ public class HardpointPatch
     public bool?    Side        { get; set; }
 }
 
+// Patches applied to the CLONED SuspensionType of this body, before the wheels are built.
+// This is the layer the game itself configures, unlike poking live Wheel instances.
+public class SuspensionTuning
+{
+    // grip multipliers: <1 makes the car slide more. LN = longitudinal, LT = lateral.
+    public float? GripLN { get; set; }
+    public float? GripLT { get; set; }
+    public float? ForceMultiplier { get; set; }
+    public SuspensionAxisDef[]? Axes { get; set; }
+    // stock suspension the tuned copy is based on
+    public string? BaseSuspension { get; set; }
+}
+
+// Mirrors Game.AxisDefinition. Every value is absolute, null leaves the stock value.
+public class SuspensionAxisDef
+{
+    public int     Index       { get; set; }
+    public float?  Width       { get; set; }   // track
+    public float?  Position    { get; set; }   // along the car, +forward
+    public float?  Height      { get; set; }
+    public float?  MountHeight { get; set; }
+    public float?  WheelRadius { get; set; }
+    public float?  SteeringAngle { get; set; }
+    // Suspension travel, so the wheel cannot ride up through the arch on bumps
+    public float?  SpringDistance { get; set; }
+    public float?  SpringLimit    { get; set; }
+}
+
 public class SuspensionAxisPatch
 {
     // axle index, front-to-rear (largest vehicle-local Z first)
@@ -82,6 +110,19 @@ public class SuspensionAxisPatch
     public float? PositionY { get; set; }
     // wheel offset from default, +forward
     public float? PositionZ { get; set; }
+    // absolute wheel radius (metres), also rescales the visual wheels of this axle
+    public float? Radius    { get; set; }
+
+    // Spring travel. The wheel positions above are the unloaded pose. The car's weight
+    // compresses the springs, so ride height and half-shaft angles come from these.
+    public float? SpringDistance { get; set; }   // Wheel.maxSpringDistance
+    public float? SpringLimit    { get; set; }   // Wheel.springDistanceLimit
+    public float? SpringForce    { get; set; }   // Wheel.maxSpringForce
+    public float? DampingMin     { get; set; }   // Wheel.minSpringDamping
+    public float? DampingMax     { get; set; }   // Wheel.maxSpringDamping
+    // Shock mount (the upper pivot the half-shaft points at), offsets from default
+    public float? MountY { get; set; }
+    public float? MountZ { get; set; }
 }
 
 public class VehicleBodyConfig
@@ -116,6 +157,11 @@ public class CustomVehicleDef
     public HardpointPatch[]?       Hardpoints        { get; set; }
     // Per-axis track-width overrides applied to the vehicle's configured SuspensionType at spawn.
     public SuspensionAxisPatch[]? SuspensionAxes   { get; set; }
+    // Target top speed in km/h. Writes CarBody.maxSpeed, which the game uses to build the gears.
+    public float? MaxSpeedKph { get; set; }
+
+    // Grip and axle geometry, applied to per-body clones of the listed suspensions.
+    public SuspensionTuning? SuspensionTuning { get; set; }
 
     public string? PaintMaskTextureName { get; set; }
     public string? AlbedoTextureName    { get; set; }

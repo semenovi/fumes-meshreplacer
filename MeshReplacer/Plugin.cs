@@ -62,7 +62,7 @@ static class MaterialCycler
 // CarEngine.maxTorque at +0x34).
 static class EngineSwapper
 {
-    // def.Id → current engine index in def.AvailableEngines
+    // def.Id -> current engine index in def.AvailableEngines
     static readonly Dictionary<string, int> _indices = new();
     static int _lastFrame = -1;
 
@@ -101,6 +101,24 @@ static class EngineSwapper
         catch (Exception e) { Plugin.L.LogWarning($"[ENG] TryCycle: {e.Message}"); }
     }
 
+    // vehicles that already got their configured engine, so this runs once per spawn
+    static readonly HashSet<IntPtr> _fitted = new();
+
+    // AvailableEngines is the F6 cycle list. Entry 0 is also the engine the car ships with.
+    // Without this the car keeps whatever engine the save had, same sound, same power.
+    public static void ApplyDefault(Game.Vehicle vehicle, CustomVehicleDef def)
+    {
+        try
+        {
+            if (def.AvailableEngines == null || def.AvailableEngines.Length == 0) return;
+            if (!_fitted.Add(vehicle.Pointer)) return;
+            _indices[def.Id] = 0;
+            Plugin.L.LogInfo($"[ENG] fitting default engine '{def.AvailableEngines[0].Id}' to '{def.Id}'");
+            Apply(vehicle, def.AvailableEngines[0]);
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"[ENG] ApplyDefault: {e.Message}"); }
+    }
+
     static void Apply(Game.Vehicle vehicle, EngineSwapDef eng)
     {
         Game.EngineType? engineType = null;
@@ -118,7 +136,7 @@ static class EngineSwapper
                 if (item != null)
                 {
                     vehicle.config.engine = item;
-                    Plugin.L.LogInfo($"[ENG] config.engine → '{engineType.id}' (label='{engineType.label}')");
+                    Plugin.L.LogInfo($"[ENG] config.engine -> '{engineType.id}' (label='{engineType.label}')");
                 }
                 else
                     Plugin.L.LogWarning($"[ENG] CreateItem cast failed for '{eng.Id}'");
@@ -154,7 +172,7 @@ static class EngineSwapper
                             Plugin.L.LogWarning("[ENG] VehicleStats.ctor exception");
                     }
                     float newTorque = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(IntPtr.Add(statsPtr, 0x24)));
-                    Plugin.L.LogInfo($"[ENG] VehicleStats.Torque → {newTorque:F3}");
+                    Plugin.L.LogInfo($"[ENG] VehicleStats.Torque -> {newTorque:F3}");
 
                     // Push the recomputed torque into the live CarEngine.
                     IntPtr simPtr = Marshal.ReadIntPtr(vehicle.Pointer + 0x68);
@@ -212,7 +230,7 @@ static class EngineSwapper
                     if (synths != null && synths.Length > 0)
                     {
                         synths[0].SetEnginePreset(preset);
-                        Plugin.L.LogInfo($"[ENG] SetEnginePreset → '{preset.name}'");
+                        Plugin.L.LogInfo($"[ENG] SetEnginePreset -> '{preset.name}'");
                     }
                     else Plugin.L.LogWarning("[ENG] no EngineSoundSynthesizer in scene");
                 }
@@ -229,7 +247,11 @@ static class EngineSwapper
 [HarmonyPatch(typeof(Game.ItemDatabase), "RuntimeLoad")]
 static class ItemDatabasePatch
 {
-    static void Postfix() => VehicleFactory.InjectBodies();
+    static void Postfix()
+    {
+        VehicleFactory.InjectBodies();
+        VehicleFactory.InjectTunedSuspensions();
+    }
 }
 
 // Safety net: SkinIconBaker.SpawnBodies iterates ItemDatabase.Bodies and dies on the first
@@ -399,6 +421,13 @@ static class VehicleUpdatePatch
         if (frame == _lastRunFrame) return;
         _lastRunFrame = frame;
 
+        try
+        {
+            var tuneDef = VehicleFactory.GetDefForVehicle(__instance);
+            if (tuneDef != null) SuspensionTuner.TickLive(__instance, tuneDef);
+        }
+        catch { }
+
         MeshReplacer.FixMaterialSlots();
         MeshReplacer.FixMatSlots();
         MeshReplacer.FixMeshes();
@@ -462,6 +491,8 @@ static class VehicleAwakePatch
             var def = VehicleFactory.GetDefForVehicle(__instance);
             if (def == null) return;
             VehicleFactory.FixNullSkin(__instance);
+            // must happen before Awake builds the wheels from the suspension definition
+            SuspensionTuner.Apply(__instance, def);
             var bt = __instance.config?.body?.Type?.TryCast<Game.BodyType>();
             if (bt == null) return;
             VehicleFactory.PatchHardpoints(bt, def);
@@ -471,6 +502,18 @@ static class VehicleAwakePatch
 
     static void Postfix(Game.Vehicle __instance)
     {
+        try
+        {
+            var def = VehicleFactory.GetDefForVehicle(__instance);
+            if (def != null)
+            {
+                // config is populated by now, grip is read live so a late patch still lands
+                SuspensionTuner.Apply(__instance, def);
+                EngineSwapper.ApplyDefault(__instance, def);
+            }
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"[VA] Postfix tuning: {e.Message}"); }
+
         MeshReplacer.Apply(__instance.transform);
         MeshReplacer.DiagnoseVehicle(__instance);
         if (LampDiag.ShouldTrace(__instance))
@@ -491,6 +534,21 @@ static class VehicleStartPatch
         MeshReplacer.DiagnoseVehicle(__instance);
         DiagnoseForBodyList(__instance);
         DumpStockCricketUv2(__instance);
+
+        // Vehicle.config is still null during Awake, so the def lookup there fails silently.
+        // Grip and the fitted engine have to be applied once the config exists.
+        try
+        {
+            var def = VehicleFactory.GetDefForVehicle(__instance);
+            if (def != null)
+            {
+                SuspensionTuner.Apply(__instance, def);
+                SuspensionTuner.ApplyLive(__instance, def);
+                SuspensionTuner.ApplyTopSpeed(__instance, def);
+                EngineSwapper.ApplyDefault(__instance, def);
+            }
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"[VS] tuning: {e.Message}"); }
     }
 
     static void DumpStockCricketUv2(Game.Vehicle v)
