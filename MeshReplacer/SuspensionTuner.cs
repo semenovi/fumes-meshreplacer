@@ -12,9 +12,6 @@ using UnityEngine;
 // Wheel fields every frame (SuspensionType.axes[i] values are consumed at build time).
 static class SuspensionTuner
 {
-    const int CONFIG_SUSPENSION = 0x48;  // VehicleConfig.suspension (SuspensionItem)
-    const int ITEM_TYPE         = 0x10;  // Item<T>.Type
-
     const int SUSP_GRIP_LN   = 0x78;
     const int SUSP_GRIP_LT   = 0x7C;
     const int SUSP_FORCE_MUL = 0x88;
@@ -31,42 +28,31 @@ static class SuspensionTuner
     const int ARRAY_LENGTH = 0x18;
     const int ARRAY_DATA   = 0x20;
 
-    static readonly Dictionary<IntPtr, IntPtr> _clones = new();
-    // keeps the cloned ScriptableObjects alive
-    static readonly List<UnityEngine.Object> _keepAlive = new();
+    const int AXIS_FIELDS_START = 0x10;
+    const int AXIS_FIELDS_END   = 0x50;
 
-    public static void Apply(Game.Vehicle vehicle, CustomVehicleDef def)
+    public static void DeepCloneAxes(IntPtr susp)
     {
-        var tuning = def.SuspensionTuning;
-        if (tuning == null) return;
+        IntPtr oldAxes = Marshal.ReadIntPtr(susp + SUSP_AXES);
+        if (oldAxes == IntPtr.Zero) return;
+        long count = Marshal.ReadInt64(oldAxes + ARRAY_LENGTH);
+        if (count <= 0) return;
 
-        try
+        IntPtr firstAxis = Marshal.ReadIntPtr(oldAxes + ARRAY_DATA);
+        if (firstAxis == IntPtr.Zero) return;
+        IntPtr axisClass = IL2CPP.il2cpp_object_get_class(firstAxis);
+
+        IntPtr newAxes = IL2CPP.il2cpp_array_new(axisClass, (ulong)count);
+        for (int i = 0; i < count; i++)
         {
-            var cfg = vehicle.config;
-            if (cfg == null) { Plugin.L.LogWarning("[SUSP] config is null, skipping"); return; }
-
-            IntPtr itemPtr = Marshal.ReadIntPtr(cfg.Pointer + CONFIG_SUSPENSION);
-            if (itemPtr == IntPtr.Zero) { Plugin.L.LogWarning("[SUSP] config.suspension is null"); return; }
-            IntPtr typePtr = Marshal.ReadIntPtr(itemPtr + ITEM_TYPE);
-            if (typePtr == IntPtr.Zero) { Plugin.L.LogWarning("[SUSP] suspension Type is null"); return; }
-
-            if (!_clones.TryGetValue(typePtr, out IntPtr clonePtr))
-            {
-                var original = new Game.SuspensionType(typePtr);
-                var clone = UnityEngine.Object.Instantiate(original).Cast<Game.SuspensionType>();
-                if (clone == null) { Plugin.L.LogWarning("[SUSP] Instantiate returned null"); return; }
-                _keepAlive.Add(clone);
-                clonePtr = clone.Pointer;
-                PatchType(clonePtr, tuning, original.id ?? "?");
-                _clones[typePtr] = clonePtr;
-            }
-
-            // NOTE: the clone is deliberately NOT written back into config.suspension.Type.
-            // Doing that crashed the game on entering the garage. The UI resolves the fitted
-            // item's Type through ItemDatabase, and a clone that was never registered there
-            // has no entry. Geometry is applied to the live wheels instead (ApplyLive).
+            IntPtr src = Marshal.ReadIntPtr(oldAxes + ARRAY_DATA + i * 8);
+            if (src == IntPtr.Zero) continue;
+            IntPtr fresh = IL2CPP.il2cpp_object_new(axisClass);
+            for (int off = AXIS_FIELDS_START; off < AXIS_FIELDS_END; off += 8)
+                Marshal.WriteInt64(fresh + off, Marshal.ReadInt64(src + off));
+            Marshal.WriteIntPtr(newAxes + ARRAY_DATA + i * 8, fresh);
         }
-        catch (Exception e) { Plugin.L.LogWarning($"[SUSP] Apply: {e.Message}"); }
+        Marshal.WriteIntPtr(susp + SUSP_AXES, newAxes);
     }
 
     public static void PatchType(IntPtr susp, SuspensionTuning tuning, string id)
@@ -124,9 +110,6 @@ static class SuspensionTuner
         }
     }
 
-    // CarBody.maxSpeed is not just a cap: GearCollection is built from it
-    // (ctor(forwardCount, engine, suspension, maxSpeed, maxReverseSpeed)), so it sets the
-    // whole gearing spread and therefore the real top speed.
     const int VEH_SIMULATION  = 0x68;   // Vehicle.simulation
     const int SIM_BODY        = 0x28;   // CarSimulation.body
     const int CARBODY_MAXSPEED = 0x5C;  // CarBody.maxSpeed
@@ -262,11 +245,7 @@ static class SuspensionTuner
                     if (Math.Abs(w.z - axleZ) > 0.2f) continue;
                     float sign = w.x >= 0 ? 1f : -1f;
 
-                    // geometry is NOT written here any more: the solver recomputes wheel
-                    // positions every step, so these writes only made the car float. Track,
-                    // position and radius come from the registered tuned suspension instead.
-                    // Travel limits: without these the spring lets the wheel ride up through
-                    // the arch and poke out of the body on bumps.
+                    // geometry is NOT written here any more
                     if (cfg.SpringDistance.HasValue) WriteFloat(w.ptr + WHEEL_SPRINGDIST,  cfg.SpringDistance.Value);
                     if (cfg.SpringLimit.HasValue)    WriteFloat(w.ptr + WHEEL_SPRINGLIMIT, cfg.SpringLimit.Value);
                 }

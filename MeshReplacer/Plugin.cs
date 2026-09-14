@@ -289,18 +289,25 @@ static class PlayableBodiesPatch
     }
 }
 
-// UIItemPicker.PopulateSuspensions filters by suspension.body == config.body.Type (pointer
-// comparison in native code). For Body-list vehicles, config.body.Type = our cloneBodyType,
-// so original suspensions (which have body = originalBodyType) would be filtered out.
-//
-// Fix: temporarily set suspension.body = cloneBodyType for the listed suspensions while
-// PopulateSuspensions runs, then restore. No SuspensionType cloning needed — cloning is
-// fundamentally broken because SuspensionType.RuntimeInit() modifies the shared axes[]
-// array objects (zeroing axis.track at offset 0x48), corrupting the original.
+[HarmonyPatch(typeof(Game.ItemDatabase), "get_PlayableSuspensions")]
+static class PlayableSuspensionsPatch
+{
+    static void Postfix(ref Il2CppReferenceArray<Game.SuspensionType> __result)
+    {
+        var clones = VehicleFactory.GetSuspensionClones();
+        if (clones.Count == 0) return;
+        int origLen = __result?.Length ?? 0;
+        var combined = new Il2CppReferenceArray<Game.SuspensionType>(origLen + clones.Count);
+        for (int i = 0; i < origLen; i++) combined[i] = __result[i];
+        for (int i = 0; i < clones.Count; i++) combined[origLen + i] = clones[i];
+        __result = combined;
+        Plugin.L.LogInfo($"[VF] PlayableSuspensions: appended {clones.Count} clone(s), total={combined.Length}");
+    }
+}
+
 [HarmonyPatch(typeof(Game.UIItemPicker), "PopulateSuspensions")]
 static class PopulateSuspensionsPatch
 {
-    // Suspensions temporarily patched this frame, stored for Postfix restoration.
     static readonly List<(Game.SuspensionType susp, Game.BodyType orig)> _swapped = new();
 
     static void Prefix(Game.UIItemPicker __instance)
@@ -308,7 +315,6 @@ static class PopulateSuspensionsPatch
         _swapped.Clear();
         try
         {
-            // Get current VehicleConfig via private get_Config() — must use native invoke.
             IntPtr klass     = IL2CPP.il2cpp_object_get_class(__instance.Pointer);
             IntPtr getConfig = IL2CPP.il2cpp_class_get_method_from_name(klass, "get_Config", 0);
             if (getConfig == IntPtr.Zero) return;
@@ -319,7 +325,6 @@ static class PopulateSuspensionsPatch
                 IntPtr configPtr = IL2CPP.il2cpp_runtime_invoke(getConfig, __instance.Pointer, null, ref exc);
                 if (configPtr == IntPtr.Zero || exc != IntPtr.Zero) return;
 
-                // VehicleConfig.body (BodyItem) at offset 0x38; BodyItem.Type at offset 0x10.
                 IntPtr bodyItemPtr = Marshal.ReadIntPtr(configPtr + 0x38);
                 if (bodyItemPtr == IntPtr.Zero) return;
                 IntPtr bodyTypePtr = Marshal.ReadIntPtr(bodyItemPtr + 0x10);
@@ -491,8 +496,6 @@ static class VehicleAwakePatch
             var def = VehicleFactory.GetDefForVehicle(__instance);
             if (def == null) return;
             VehicleFactory.FixNullSkin(__instance);
-            // must happen before Awake builds the wheels from the suspension definition
-            SuspensionTuner.Apply(__instance, def);
             var bt = __instance.config?.body?.Type?.TryCast<Game.BodyType>();
             if (bt == null) return;
             VehicleFactory.PatchHardpoints(bt, def);
@@ -506,11 +509,7 @@ static class VehicleAwakePatch
         {
             var def = VehicleFactory.GetDefForVehicle(__instance);
             if (def != null)
-            {
-                // config is populated by now, grip is read live so a late patch still lands
-                SuspensionTuner.Apply(__instance, def);
                 EngineSwapper.ApplyDefault(__instance, def);
-            }
         }
         catch (Exception e) { Plugin.L.LogWarning($"[VA] Postfix tuning: {e.Message}"); }
 
@@ -542,9 +541,7 @@ static class VehicleStartPatch
             var def = VehicleFactory.GetDefForVehicle(__instance);
             if (def != null)
             {
-                SuspensionTuner.Apply(__instance, def);
                 SuspensionTuner.ApplyLive(__instance, def);
-                SuspensionTuner.ApplyTopSpeed(__instance, def);
                 EngineSwapper.ApplyDefault(__instance, def);
             }
         }
@@ -568,6 +565,13 @@ static class VehicleStartPatch
     }
     static void Postfix(Game.Vehicle __instance)
     {
+        try
+        {
+            var def = VehicleFactory.GetDefForVehicle(__instance);
+            if (def != null) SuspensionTuner.ApplyTopSpeed(__instance, def);
+        }
+        catch (Exception e) { Plugin.L.LogWarning($"[VS] Postfix tuning: {e.Message}"); }
+
         MeshReplacer.Apply(__instance.transform);
         if (LampDiag.ShouldTrace(__instance))
             LampDiag.Dump(__instance, "START");

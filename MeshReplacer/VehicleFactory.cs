@@ -9,6 +9,7 @@ static class VehicleFactory
     // Keyed by def.Id.
     static readonly Dictionary<string, CustomVehicleDef> _defs     = new();
     static readonly List<Game.BodyType>                  _clones   = new();
+    static readonly List<Game.SuspensionType>             _suspensionClones = new();
     // Maps clone body id -> (def, cloneBodyType, originalBodyType) for the suspension patch.
     static readonly Dictionary<string, (CustomVehicleDef def, Game.BodyType clone, Game.BodyType original)> _bodyMap = new();
     static bool _bodiesInjected;
@@ -25,6 +26,7 @@ static class VehicleFactory
         => id != null && _defs.TryGetValue(id, out var d) ? d : null;
 
     public static List<Game.BodyType> GetClones() => _clones;
+    public static List<Game.SuspensionType> GetSuspensionClones() => _suspensionClones;
 
     public static Dictionary<string, (CustomVehicleDef def, Game.BodyType clone, Game.BodyType original)> GetBodyMap()
         => _bodyMap;
@@ -118,13 +120,6 @@ static class VehicleFactory
         }
     }
 
-    // Registers a tuned copy of a stock suspension as a real item bound to our body.
-    //
-    // Grip and axle geometry are only honoured when the game BUILDS the wheels (Vehicle.Awake),
-    // and by then a def cannot be resolved from the vehicle (config is still null). Writing the
-    // live Wheels afterwards does not stick either, the solver recomputes them, which is why
-    // the car kept floating. A registered clone sidesteps both: the player fits it in the
-    // garage and the game itself builds the wheels from our numbers.
     public static void InjectTunedSuspensions()
     {
         var suspensions = Game.ItemDatabase.Suspensions;
@@ -147,7 +142,7 @@ static class VehicleFactory
             try { clone = UnityEngine.Object.Instantiate(src).Cast<Game.SuspensionType>(); }
             catch (Exception e) { Plugin.L.LogError($"[SUSP] clone failed: {e.Message}"); continue; }
 
-            string newId = baseId + "-" + def.Id;
+            string newId = TunedSuspensionId(def, baseId);
             try
             {
                 clone.id = newId;
@@ -156,7 +151,11 @@ static class VehicleFactory
             }
             catch (Exception e) { Plugin.L.LogWarning($"[SUSP] set fields: {e.Message}"); }
 
+            SuspensionTuner.DeepCloneAxes(clone.Pointer);
             SuspensionTuner.PatchType(clone.Pointer, tuning, baseId);
+
+            try { clone.RuntimeInit(); }
+            catch (Exception e) { Plugin.L.LogWarning($"[SUSP] RuntimeInit: {e.Message}"); }
 
             try { Game.ItemDatabase.RegisterItemType(clone); }
             catch (Exception e) { Plugin.L.LogWarning($"[SUSP] RegisterItemType: {e.Message}"); }
@@ -166,6 +165,7 @@ static class VehicleFactory
                 try { if (suspensions[i]?.Pointer == clone.Pointer) { present = true; break; } } catch { }
             if (!present)
                 try { suspensions.Add(clone); } catch (Exception e) { Plugin.L.LogError($"[SUSP] add: {e.Message}"); continue; }
+            _suspensionClones.Add(clone);
 
             var list = new List<string>();
             if (def.AvailableSuspensions != null) list.AddRange(def.AvailableSuspensions);
@@ -176,9 +176,9 @@ static class VehicleFactory
         }
     }
 
-    // Loads <vehicle folder>\bakedata.bin (written by gen_bakedata.py) and replaces the
-    // clone's bakeData. File format: 5 sides (top, front, back, right, left), each:
-    // int32 count, then count * { int32 texelIndex; float x, y, z }.
+    static string TunedSuspensionId(CustomVehicleDef def, string? baseId = null)
+        => (baseId ?? def.SuspensionTuning?.BaseSuspension ?? "suspension-caro-stock") + "-" + def.Id;
+
     static void ApplyCustomBakeData(Game.BodyType clone, CustomVehicleDef def)
     {
         var path = System.IO.Path.Combine(def.FolderPath, "bakedata.bin");
@@ -401,8 +401,6 @@ static class VehicleFactory
     {
         var cfg  = new Save.VehicleConfigSaveData();
         var body = new Save.ItemSaveData();
-        // useCloneId=true tests whether RuntimeInit() fixed the Body list crash:
-        // clone body id is used, triggering the same code path as garage-assembled vehicle.
         body.id = useCloneId ? def.Id : def.BaseBodyId;
         try { if (src?.body?.stats != null) body.stats = src.body.stats; } catch { }
         cfg.body = body;
@@ -410,9 +408,8 @@ static class VehicleFactory
         try { if (src?.engine     != null) cfg.engine     = src.engine;     } catch { }
         try { if (src?.suspension != null) cfg.suspension = src.suspension; } catch { }
         try { if (src?.wheels     != null) cfg.wheels     = src.wheels;     } catch { }
-        // Do NOT copy skin. VehicleConfigSaveData.GetSkin() resolves skin by player index,
-        // which can be out of range if src comes from a different save context (e.g. NPC config
-        // or our own repaired config from the previous session). FixNullSkin assigns at Awake.
+        if (def.SuspensionTuning != null)
+            try { cfg.suspension = new Save.ItemSaveData { id = TunedSuspensionId(def) }; } catch { }
         try { if (src?.bodyColor  != null) cfg.bodyColor  = src.bodyColor;  } catch { }
         try { if (src?.modules    != null) cfg.modules    = src.modules;    } catch { }
         try { if (src?.fireGroups != null) cfg.fireGroups = src.fireGroups; } catch { }
